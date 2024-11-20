@@ -1,0 +1,6099 @@
+# Program description
+This program is looking for a passphrase that is corresponded to the defined p-chain address. All results are correct. Now we are talking about performance.
+
+# ripmd160.h
+```
+#include <stdint.h>
+#include <string.h>
+
+#define MY_SHA256_DIGEST_LENGTH 32
+#define RIPEMD160_DIGEST_SIZE 20
+
+__device__ void ripemd160(const uint8_t* data, uint32_t data_len, uint8_t* digest_bytes);
+
+/* Constants etc. taken directly from https://homes.esat.kuleuven.be/~bosselae/ripemd160/pdf/AB-9601/AB-9601.pdf */
+
+__device__ uint32_t ripemd160_initial_digest[5] =
+    { 0x67452301UL, 0xefcdab89UL, 0x98badcfeUL, 0x10325476UL, 0xc3d2e1f0UL };
+
+__device__ uint8_t ripemd160_rho[16] =
+    { 0x7, 0x4, 0xd, 0x1, 0xa, 0x6, 0xf, 0x3, 0xc, 0x0, 0x9, 0x5, 0x2, 0xe, 0xb, 0x8 };
+
+__device__ uint8_t ripemd160_shifts[80] =
+    { 11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8
+    , 12, 13, 11, 15, 6, 9, 9, 7, 12, 15, 11, 13, 7, 8, 7, 7
+    , 13, 15, 14, 11, 7, 7, 6, 8, 13, 14, 13, 12, 5, 5, 6, 9
+    , 14, 11, 12, 14, 8, 6, 5, 5, 15, 12, 15, 14, 9, 9, 8, 6
+    , 15, 12, 13, 13, 9, 5, 8, 6, 14, 11, 12, 11, 8, 6, 5, 5
+    };
+
+__device__ uint32_t ripemd160_constants_left[5] =
+    { 0x00000000UL, 0x5a827999UL, 0x6ed9eba1UL, 0x8f1bbcdcUL, 0xa953fd4eUL };
+
+__device__ uint32_t ripemd160_constants_right[5] =
+    { 0x50a28be6UL, 0x5c4dd124UL, 0x6d703ef3UL, 0x7a6d76e9UL, 0x00000000UL };
+
+__device__ uint8_t ripemd160_fns_left[5]  = { 1, 2, 3, 4, 5 };
+
+__device__ uint8_t ripemd160_fns_right[5] = { 5, 4, 3, 2, 1 };
+
+#define ROL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+__device__ void ripemd160_compute_line(uint32_t* digest, uint32_t* words, uint32_t* chunk, uint8_t* index, uint8_t* shifts, uint32_t* ks, uint8_t* fns) {
+    for (uint8_t i = 0; i < 5; i++) {
+        words[i] = digest[i];
+    }
+
+    for (uint8_t round = 0; /* breaks out mid-loop */; round++) {
+        uint32_t k  = ks[round];
+        uint8_t  fn = fns[round];
+        for (uint8_t i = 0; i < 16; i++) {
+            uint32_t tmp;
+            switch (fn) {
+                case 1:
+                    tmp = words[1] ^ words[2] ^ words[3];
+                    break;
+                case 2:
+                    tmp = (words[1] & words[2]) | (~words[1] & words[3]);
+                    break;
+                case 3:
+                    tmp = (words[1] | ~words[2]) ^ words[3];
+                    break;
+                case 4:
+                    tmp = (words[1] & words[3]) | (words[2] & ~words[3]);
+                    break;
+                case 5:
+                    tmp = words[1] ^ (words[2] | ~words[3]);
+                    break;
+            }
+            tmp += words[0] + chunk[index[i]] + k;
+            tmp = ROL(tmp, shifts[index[i]]) + words[4];
+            words[0] = words[4];
+            words[4] = words[3];
+            words[3] = ROL(words[2], 10);
+            words[2] = words[1];
+            words[1] = tmp;
+        }
+        if (round == 4) {
+            break;
+        }
+        shifts += 16;
+
+        uint8_t index_tmp[16];
+        for (uint8_t i = 0; i < 16; i++) {
+            index_tmp[i] = ripemd160_rho[index[i]];
+        }
+        for (uint8_t i = 0; i < 16; i++) {
+            index[i] = index_tmp[i];
+        }
+    }
+}
+
+__device__ void ripemd160_update_digest(uint32_t* digest, uint32_t* chunk)
+{
+    uint8_t index[16];
+
+    /* initial permutation for left line is the identity */
+    for (uint8_t i = 0; i < 16; i++) {
+        index[i] = i;
+    }
+    uint32_t words_left[5];
+    ripemd160_compute_line(digest, words_left, chunk, index, ripemd160_shifts, ripemd160_constants_left, ripemd160_fns_left);
+
+    /* initial permutation for right line is 5+9i (mod 16) */
+    index[0] = 5;
+    for (uint8_t i = 1; i < 16; i++) {
+        index[i] = (index[i-1] + 9) & 0x0f;
+    }
+    uint32_t words_right[5];
+    ripemd160_compute_line(digest, words_right, chunk, index, ripemd160_shifts, ripemd160_constants_right, ripemd160_fns_right);
+
+    /* update digest */
+    digest[0] += words_left[1] + words_right[2];
+    digest[1] += words_left[2] + words_right[3];
+    digest[2] += words_left[3] + words_right[4];
+    digest[3] += words_left[4] + words_right[0];
+    digest[4] += words_left[0] + words_right[1];
+
+    /* final rotation */
+    words_left[0] = digest[0];
+    digest[0] = digest[1];
+    digest[1] = digest[2];
+    digest[2] = digest[3];
+    digest[3] = digest[4];
+    digest[4] = words_left[0];
+}
+
+__device__ void ripemd160(const uint8_t* data, uint32_t data_len, uint8_t* digest_bytes)
+{
+    /* NB assumes correct endianness */
+    uint32_t *digest = (uint32_t*)digest_bytes;
+    for (uint8_t i = 0; i < 5; i++) {
+        digest[i] = ripemd160_initial_digest[i];
+    }
+
+    const uint8_t *last_chunk_start = data + (data_len & (~0x3f));
+    while (data < last_chunk_start) {
+        ripemd160_update_digest(digest, (uint32_t*)data);
+        data += 0x40;
+    }
+
+    uint8_t last_chunk[0x40];
+    uint8_t leftover_size = data_len & 0x3f;
+    for (uint8_t i = 0; i < leftover_size; i++) {
+        last_chunk[i] = *data++;
+    }
+
+    /* append a single 1 bit and then zeroes, leaving 8 bytes for the length at the end */
+    last_chunk[leftover_size] = 0x80;
+    for (uint8_t i = leftover_size + 1; i < 0x40; i++) {
+        last_chunk[i] = 0;
+    }
+
+    if (leftover_size >= 0x38) {
+        /* no room for size in this chunk, add another chunk of zeroes */
+        ripemd160_update_digest(digest, (uint32_t*)last_chunk);
+        for (uint8_t i = 0; i < 0x38; i++) {
+            last_chunk[i] = 0;
+        }
+    }
+
+    uint32_t *length_lsw = (uint32_t *)(last_chunk + 0x38);
+    *length_lsw = (data_len << 3);
+    uint32_t *length_msw = (uint32_t *)(last_chunk + 0x3c);
+    *length_msw = (data_len >> 29);
+
+    ripemd160_update_digest(digest, (uint32_t*)last_chunk);
+}
+```
+
+# public_key.h
+```
+#define CURVE_P_VALUES_MAX_SIZE 4
+__device__ __constant__ BN_ULONG CURVE_GX_values[CURVE_P_VALUES_MAX_SIZE] = {
+        0x79BE667EF9DCBBAC,
+        0x55A06295CE870B07,
+        0x029BFCDB2DCE28D9,
+        0x59F2815B16F81798
+        };
+__device__ __constant__ BN_ULONG CURVE_GY_values[CURVE_P_VALUES_MAX_SIZE] = {
+        0x483ADA7726A3C465,
+        0x5DA4FBFC0E1108A8,
+        0xFD17B448A6855419,
+        0x9C47D08FFB10D4B8
+        };
+__device__ __constant__ BIGNUM CURVE_A = {0};
+__device__ __constant__ BIGNUM CURVE_P = {
+    {
+        0xFFFFFFFEFFFFFC2F,
+        0xFFFFFFFFFFFFFFFF,
+        0xFFFFFFFFFFFFFFFF,
+        0xFFFFFFFFFFFFFFFF
+    },
+    CURVE_P_VALUES_MAX_SIZE,
+    false
+};
+
+__device__ void GetPublicKey(uint8_t* buffer, uint8_t* key)
+{
+    BIGNUM newKey;
+    init_zero(&newKey);
+    for (int i = 0; i < CURVE_P_VALUES_MAX_SIZE; ++i) {
+        newKey.d[3 - i] = ((BN_ULONG)key[8*i] << 56) | 
+                            ((BN_ULONG)key[8*i + 1] << 48) | 
+                            ((BN_ULONG)key[8*i + 2] << 40) | 
+                            ((BN_ULONG)key[8*i + 3] << 32) |
+                            ((BN_ULONG)key[8*i + 4] << 24) | 
+                            ((BN_ULONG)key[8*i + 5] << 16) | 
+                            ((BN_ULONG)key[8*i + 6] << 8) | 
+                            ((BN_ULONG)key[8*i + 7]);
+    }
+    newKey.top = CURVE_P_VALUES_MAX_SIZE;
+
+    // Initialize generator
+    EC_POINT G;
+    init_zero(&G.x);
+    init_zero(&G.y);
+    for (int j = 0; j < MAX_BIGNUM_SIZE; ++j) {
+            G.x.d[j] = CURVE_GX_values[j];
+            G.y.d[j] = CURVE_GY_values[j];
+        }
+    // reverse
+    reverse_order(&G.x, CURVE_P_VALUES_MAX_SIZE);
+    reverse_order(&G.y, CURVE_P_VALUES_MAX_SIZE);
+    G.x.top = CURVE_P_VALUES_MAX_SIZE;
+    G.y.top = CURVE_P_VALUES_MAX_SIZE;
+
+    // TODO: Check do we need to define curves, G and do reversing
+    EC_POINT publicKey = ec_point_scalar_mul(&G, &newKey, &CURVE_P, &CURVE_A);    
+    // Copy the public key to buffer
+    for (int i = 0; i < CURVE_P_VALUES_MAX_SIZE; i++) {
+        buffer[8*i] = (publicKey.x.d[3 - i] >> 56) & 0xFF;
+        buffer[8*i + 1] = (publicKey.x.d[3 - i] >> 48) & 0xFF;
+        buffer[8*i + 2] = (publicKey.x.d[3 - i] >> 40) & 0xFF;
+        buffer[8*i + 3] = (publicKey.x.d[3 - i] >> 32) & 0xFF;
+        buffer[8*i + 4] = (publicKey.x.d[3 - i] >> 24) & 0xFF;
+        buffer[8*i + 5] = (publicKey.x.d[3 - i] >> 16) & 0xFF;
+        buffer[8*i + 6] = (publicKey.x.d[3 - i] >> 8) & 0xFF;
+        buffer[8*i + 7] = publicKey.x.d[3 - i] & 0xFF;
+    }
+    // Shift the buffer by 1 byte
+    for (int i = 33; i > 0; i--) {
+        buffer[i] = buffer[i - 1];
+    }
+    
+    // Determine the prefix based on the Y coordinate
+    BIGNUM two, quotient, remainder;
+    init_zero(&two);
+    init_zero(&quotient);
+    init_zero(&remainder);
+    // Set two to 2
+    bn_set_word(&two, 2);
+    bn_div(&quotient, &remainder, &publicKey.y, &two);
+    uint8_t prefix = bn_is_zero(&remainder) ? 0x02 : 0x03;
+    // Add prefix before the buffer
+    buffer[0] = prefix;
+}
+```
+
+# pbkdf2.h
+```
+#include <cstdint>
+
+// The rotate operation for 64bits
+#define ROR64(x,n) ((x >> n) | (x << (64 - n)))
+#define CH(x,y,z)  (z ^ (x & (y ^ z))) // pbkdf2 version
+#define MAJ(x,y,z) ((x & y) | (z & (x | y))) // pbkdf2 version
+// #define CH(x,y,z)  ((z) ^ ((x) & ((y) ^ (z)))) // SHA256 version
+// #define MAJ(x,y,z) (((x) & (y)) | ((z) & ((x) | (y)))) // SHA256 version
+#define S0_64(x)   (ROR64((x), 28) ^ ROR64((x),  34) ^ ROR64((x), 39)) 
+#define S1_64(x)   (ROR64((x), 14) ^ ROR64((x),  18) ^ ROR64((x), 41)) 
+#define R0_64(x)   (ROR64((x), 1)  ^ ROR64((x),  8)  ^ ((x) >> 7)) 
+#define R1_64(x)   (ROR64((x), 19) ^ ROR64((x), 61) ^ ((x) >> 6))
+
+#ifndef PBKDF2_SHA512_INCLUDE
+#define PBKDF2_SHA512_INCLUDE
+
+#define SHA512_BLOCKLEN  128ul
+#define SHA512_DIGESTLEN 64ul
+#define SHA512_DIGESTINT 8ul
+
+#ifndef PBKDF2_SHA512_STATIC
+#define PBKDF2_SHA512_DEF extern
+#else
+#define PBKDF2_SHA512_DEF static
+#endif
+
+#include <stdint.h>
+#include <string.h>
+
+typedef struct sha512_ctx_t
+{
+    uint64_t len;  // Make sure this is uint64_t
+    uint64_t h[SHA512_DIGESTINT];
+    uint8_t buf[SHA512_BLOCKLEN];
+} SHA512_CTX;
+
+__device__ void sha512_init(SHA512_CTX *ctx);
+__device__ void sha512_update(SHA512_CTX *ctx, const uint8_t *m, uint32_t mlen);
+__device__ void sha512_final(SHA512_CTX *ctx, uint8_t *md);
+
+typedef struct hmac_sha512_ctx_t
+{
+	uint8_t buf[SHA512_BLOCKLEN]; // key block buffer, not needed after init
+	uint64_t h_inner[SHA512_DIGESTINT];
+	uint64_t h_outer[SHA512_DIGESTINT];
+	SHA512_CTX sha;
+} HMAC_SHA512_CTX;
+
+PBKDF2_SHA512_DEF __device__ void hmac_sha512_init(HMAC_SHA512_CTX *hmac, const uint8_t *key, uint32_t keylen);
+PBKDF2_SHA512_DEF __device__ void hmac_sha512_update(HMAC_SHA512_CTX *hmac, const uint8_t *m, uint32_t mlen);
+// resets state to hmac_sha512_init
+PBKDF2_SHA512_DEF __device__ void hmac_sha512_final(HMAC_SHA512_CTX *hmac, uint8_t *md);
+
+PBKDF2_SHA512_DEF __device__ void pbkdf2_sha512(HMAC_SHA512_CTX *ctx,
+    const uint8_t *key, uint32_t keylen, const uint8_t *salt, uint32_t saltlen, uint32_t rounds,
+    uint8_t *dk, uint32_t dklen);
+
+#endif // PBKDF2_SHA512_INCLUDE
+
+//------------------------------------------------------------------------------
+
+#ifdef PBKDF2_SHA512_IMPLEMENTATION
+
+#include <string.h>
+
+#define ROR(n,k) ror(n,k)
+
+#define CH(x,y,z)  (z ^ (x & (y ^ z)))
+#define MAJ(x,y,z) ((x & y) | (z & (x | y)))
+#define S0(x)      (ROR(x, 2) ^ ROR(x,13) ^ ROR(x,22))
+#define S1(x)      (ROR(x, 6) ^ ROR(x,11) ^ ROR(x,25))
+#define R0(x)      (ROR(x, 7) ^ ROR(x,18) ^ (x>>3))
+#define R1(x)      (ROR(x,17) ^ ROR(x,19) ^ (x>>10))
+
+#endif
+
+#define INNER_PAD '\x36'
+#define OUTER_PAD '\x5c'
+
+__device__ static const uint64_t K[80] = {
+    UINT64_C(0x428a2f98d728ae22), UINT64_C(0x7137449123ef65cd),
+    UINT64_C(0xb5c0fbcfec4d3b2f), UINT64_C(0xe9b5dba58189dbbc),
+    UINT64_C(0x3956c25bf348b538), UINT64_C(0x59f111f1b605d019),
+    UINT64_C(0x923f82a4af194f9b), UINT64_C(0xab1c5ed5da6d8118),
+    UINT64_C(0xd807aa98a3030242), UINT64_C(0x12835b0145706fbe),
+    UINT64_C(0x243185be4ee4b28c), UINT64_C(0x550c7dc3d5ffb4e2),
+    UINT64_C(0x72be5d74f27b896f), UINT64_C(0x80deb1fe3b1696b1),
+    UINT64_C(0x9bdc06a725c71235), UINT64_C(0xc19bf174cf692694),
+    UINT64_C(0xe49b69c19ef14ad2), UINT64_C(0xefbe4786384f25e3),
+    UINT64_C(0x0fc19dc68b8cd5b5), UINT64_C(0x240ca1cc77ac9c65),
+    UINT64_C(0x2de92c6f592b0275), UINT64_C(0x4a7484aa6ea6e483),
+    UINT64_C(0x5cb0a9dcbd41fbd4), UINT64_C(0x76f988da831153b5),
+    UINT64_C(0x983e5152ee66dfab), UINT64_C(0xa831c66d2db43210),
+    UINT64_C(0xb00327c898fb213f), UINT64_C(0xbf597fc7beef0ee4),
+    UINT64_C(0xc6e00bf33da88fc2), UINT64_C(0xd5a79147930aa725),
+    UINT64_C(0x06ca6351e003826f), UINT64_C(0x142929670a0e6e70),
+    UINT64_C(0x27b70a8546d22ffc), UINT64_C(0x2e1b21385c26c926),
+    UINT64_C(0x4d2c6dfc5ac42aed), UINT64_C(0x53380d139d95b3df),
+    UINT64_C(0x650a73548baf63de), UINT64_C(0x766a0abb3c77b2a8),
+    UINT64_C(0x81c2c92e47edaee6), UINT64_C(0x92722c851482353b),
+    UINT64_C(0xa2bfe8a14cf10364), UINT64_C(0xa81a664bbc423001),
+    UINT64_C(0xc24b8b70d0f89791), UINT64_C(0xc76c51a30654be30),
+    UINT64_C(0xd192e819d6ef5218), UINT64_C(0xd69906245565a910),
+    UINT64_C(0xf40e35855771202a), UINT64_C(0x106aa07032bbd1b8),
+    UINT64_C(0x19a4c116b8d2d0c8), UINT64_C(0x1e376c085141ab53),
+    UINT64_C(0x2748774cdf8eeb99), UINT64_C(0x34b0bcb5e19b48a8),
+    UINT64_C(0x391c0cb3c5c95a63), UINT64_C(0x4ed8aa4ae3418acb),
+    UINT64_C(0x5b9cca4f7763e373), UINT64_C(0x682e6ff3d6b2b8a3),
+    UINT64_C(0x748f82ee5defb2fc), UINT64_C(0x78a5636f43172f60),
+    UINT64_C(0x84c87814a1f0ab72), UINT64_C(0x8cc702081a6439ec),
+    UINT64_C(0x90befffa23631e28), UINT64_C(0xa4506cebde82bde9),
+    UINT64_C(0xbef9a3f7b2c67915), UINT64_C(0xc67178f2e372532b),
+    UINT64_C(0xca273eceea26619c), UINT64_C(0xd186b8c721c0c207),
+    UINT64_C(0xeada7dd6cde0eb1e), UINT64_C(0xf57d4f7fee6ed178),
+    UINT64_C(0x06f067aa72176fba), UINT64_C(0x0a637dc5a2c898a6),
+    UINT64_C(0x113f9804bef90dae), UINT64_C(0x1b710b35131c471b),
+    UINT64_C(0x28db77f523047d84), UINT64_C(0x32caab7b40c72493),
+    UINT64_C(0x3c9ebe0a15c9bebc), UINT64_C(0x431d67c49c100d4c),
+    UINT64_C(0x4cc5d4becb3e42b6), UINT64_C(0x597f299cfc657e2a),
+    UINT64_C(0x5fcb6fab3ad6faec), UINT64_C(0x6c44198c4a475817),
+};
+
+__device__ void my_cuda_memcpy_uint64(uint64_t *dst, const uint64_t *src, unsigned int n) {
+    for (unsigned int i = 0; i < n / sizeof(uint64_t); ++i) {  // assuming n is in bytes
+        dst[i] = src[i];
+    }
+}
+
+__device__ void my_cuda_memcpy_unsigned_char(uint8_t *dst, const uint8_t *src, unsigned int n) {
+    for (unsigned int i = 0; i < n; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+__device__ size_t my_strlen(const char *str) {
+    size_t len = 0;
+    while (*str != '\0') {
+        ++len;
+        ++str;
+    }
+    return len;
+}
+
+__device__ void sha512_init(SHA512_CTX *s)
+{
+	s->len = 0;
+	s->h[0] = 0x6a09e667f3bcc908ULL;
+	s->h[1] = 0xbb67ae8584caa73bULL;
+	s->h[2] = 0x3c6ef372fe94f82bULL;
+	s->h[3] = 0xa54ff53a5f1d36f1ULL;
+	s->h[4] = 0x510e527fade682d1ULL;
+	s->h[5] = 0x9b05688c2b3e6c1fULL;
+	s->h[6] = 0x1f83d9abfb41bd6bULL;
+	s->h[7] = 0x5be0cd19137e2179ULL;
+}
+
+__device__ static void sha512_transform(SHA512_CTX *s, const uint8_t *buf)
+{
+    uint64_t t1, t2, a, b, c, d, e, f, g, h, m[80];
+    uint32_t i, j;
+
+    for (i = 0, j = 0; i < 16; i++, j += 8)
+    {
+        m[i] = ((uint64_t)buf[j] << 56) | ((uint64_t)buf[j + 1] << 48) |
+               ((uint64_t)buf[j + 2] << 40) | ((uint64_t)buf[j + 3] << 32) |
+               ((uint64_t)buf[j + 4] << 24) | ((uint64_t)buf[j + 5] << 16) |
+               ((uint64_t)buf[j + 6] << 8) | ((uint64_t)buf[j + 7]);
+    }
+	uint64_t temp1, temp2, temp3, temp4;
+    for (; i < 80; i++)
+    {
+        // m[i] = R1_64(m[i - 2]) + m[i - 7] + R0_64(m[i - 15]) + m[i - 16];
+		// Split into multiple operations:
+		m[i] = R1_64(m[i - 2]);
+		m[i] += m[i - 7];
+		m[i] += R0_64(m[i - 15]);
+		m[i] += m[i - 16];
+    }
+
+    a = s->h[0];
+    b = s->h[1];
+    c = s->h[2];
+    d = s->h[3];
+    e = s->h[4];
+    f = s->h[5];
+    g = s->h[6];
+    h = s->h[7];
+
+    for (i = 0; i < 80; i++) // Increase loop limit to 80
+    {
+        // t1 = h + S1_64(e) + CH(e, f, g) + K[i] + m[i];
+		t1 = h + S1_64(e);
+		t1 += CH(e, f, g);
+		t1 += K[i];
+		t1 += m[i];
+
+        // t2 = S0_64(a) + MAJ(a, b, c);
+		t2 = S0_64(a);
+		t2 += MAJ(a, b, c);
+		
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+	s->h[0] += a;
+	s->h[1] += b;
+	s->h[2] += c;
+	s->h[3] += d;
+	s->h[4] += e;
+	s->h[5] += f;
+	s->h[6] += g;
+	s->h[7] += h;
+}
+
+__device__ void sha512_update(SHA512_CTX *s, const uint8_t *m, uint32_t len)
+{
+	const uint8_t *p = m;
+	uint32_t r = s->len % SHA512_BLOCKLEN;
+	
+	s->len += len;
+	if (r)
+	{
+		if (len + r < SHA512_BLOCKLEN)
+		{
+            my_cuda_memcpy_unsigned_char(s->buf + r, p, len);
+			return;
+		}
+        my_cuda_memcpy_unsigned_char(s->buf + r, p, SHA512_BLOCKLEN - r);
+		len -= SHA512_BLOCKLEN - r;
+		p += SHA512_BLOCKLEN - r;
+		sha512_transform(s, s->buf);
+	}
+	for (; len >= SHA512_BLOCKLEN; len -= SHA512_BLOCKLEN, p += SHA512_BLOCKLEN)
+	{
+		sha512_transform(s, p);
+	}
+    my_cuda_memcpy_unsigned_char(s->buf, p, len);
+}
+
+__device__ void sha512_final(SHA512_CTX *s, uint8_t *md)
+{
+	uint32_t r = s->len % SHA512_BLOCKLEN;
+	uint64_t totalBits = s->len * 8;  // Total bits
+	uint64_t len_lower = totalBits & 0xFFFFFFFFFFFFFFFFULL;  // Lower 64 bits
+    uint64_t len_upper = 0;  // Upper 64 bits are zero for 64-bit totalBits
+
+	
+    // Pad message
+    s->buf[r++] = 0x80;
+    while (r < 112)  // Padding until the total length is 112
+    {
+        s->buf[r++] = 0x00;
+    }
+
+    // Write 128 bit processed length in big-endian
+    for (int i = 0; i < 8; ++i)
+    {
+		s->buf[r++] = (len_upper >> (8 * (7 - i))) & 0xFF;
+	}
+
+	for (int i = 0; i < 8; ++i)
+    {
+		s->buf[r++] = (len_lower >> (8 * (7 - i))) & 0xFF;
+	}
+	sha512_transform(s, s->buf);
+	
+	for (uint32_t i = 0; i < SHA512_DIGESTINT; i++)
+	{
+		md[8 * i    ] = s->h[i] >> 56;
+		md[8 * i + 1] = s->h[i] >> 48;
+		md[8 * i + 2] = s->h[i] >> 40;
+		md[8 * i + 3] = s->h[i] >> 32;
+		md[8 * i + 4] = s->h[i] >> 24;
+		md[8 * i + 5] = s->h[i] >> 16;
+		md[8 * i + 6] = s->h[i] >> 8;
+		md[8 * i + 7] = s->h[i];
+	}
+	sha512_init(s);
+}
+
+PBKDF2_SHA512_DEF __device__ void hmac_sha512_init(HMAC_SHA512_CTX *hmac, const uint8_t *key, uint32_t keylen)
+{
+	SHA512_CTX *sha = &hmac->sha;
+	
+	if (keylen <= SHA512_BLOCKLEN)
+	{
+        my_cuda_memcpy_unsigned_char(hmac->buf, key, keylen);
+		memset(hmac->buf + keylen, '\0', SHA512_BLOCKLEN - keylen);
+	}
+	else
+	{
+		sha512_init(sha);
+		sha512_update(sha, key, keylen);
+		sha512_final(sha, hmac->buf);
+		memset(hmac->buf + SHA512_DIGESTLEN, '\0', SHA512_BLOCKLEN - SHA512_DIGESTLEN);
+	}
+	
+	uint32_t i;
+	for (i = 0; i < SHA512_BLOCKLEN; i++)
+	{
+		hmac->buf[ i ] = hmac->buf[ i ] ^ OUTER_PAD;
+	}
+	sha512_init(sha);
+	sha512_update(sha, hmac->buf, SHA512_BLOCKLEN);
+	// copy outer state
+    my_cuda_memcpy_uint64(hmac->h_outer, sha->h, SHA512_DIGESTLEN);	
+	for (i = 0; i < SHA512_BLOCKLEN; i++)
+	{
+		hmac->buf[ i ] = (hmac->buf[ i ] ^ OUTER_PAD) ^ INNER_PAD;
+	}
+	
+	sha512_init(sha);
+	sha512_update(sha, hmac->buf, SHA512_BLOCKLEN);
+	// copy inner state
+    my_cuda_memcpy_uint64(hmac->h_inner, sha->h, SHA512_DIGESTLEN);
+}
+
+PBKDF2_SHA512_DEF __device__ void hmac_sha512_update(HMAC_SHA512_CTX *hmac, const uint8_t *m, uint32_t mlen)
+{
+	sha512_update(&hmac->sha, m, mlen);
+}
+
+PBKDF2_SHA512_DEF __device__ void hmac_sha512_final(HMAC_SHA512_CTX *hmac, uint8_t *md)
+{
+	SHA512_CTX *sha = &hmac->sha;
+	sha512_final(sha, md);
+	
+	// reset sha to outer state
+    my_cuda_memcpy_uint64(sha->h, hmac->h_outer, SHA512_DIGESTLEN);
+	sha->len = SHA512_BLOCKLEN;
+	
+	sha512_update(sha, md, SHA512_DIGESTLEN);
+	sha512_final(sha, md); // md = D(outer || D(inner || msg))
+	
+	// reset sha to inner state -> reset hmac
+    my_cuda_memcpy_uint64(sha->h, hmac->h_inner, SHA512_DIGESTLEN);
+	sha->len = SHA512_BLOCKLEN;
+}
+
+__device__ PBKDF2_SHA512_DEF void pbkdf2_sha512(HMAC_SHA512_CTX *hmac,
+    const uint8_t *key, uint32_t keylen, const uint8_t *salt, uint32_t saltlen, uint32_t rounds,
+    uint8_t *dk, uint32_t dklen)
+{
+	uint32_t hlen = SHA512_DIGESTLEN;
+	uint32_t l = dklen / hlen + ((dklen % hlen) ? 1 : 0);
+	uint32_t r = dklen - (l - 1) * hlen;
+	
+	hmac_sha512_init(hmac, key, keylen);
+	
+	uint8_t *U = hmac->buf;
+	uint8_t *T = dk;
+	uint8_t count[4];
+	
+	uint32_t i, j, k;
+	uint32_t len = hlen;
+	for (i = 1; i <= l; i++)
+	{
+		if (i == l) { len = r; }
+		count[0] = (i >> 24) & 0xFF;
+		count[1] = (i >> 16) & 0xFF;
+		count[2] = (i >>  8) & 0xFF;
+		count[3] = (i) & 0xFF;
+		hmac_sha512_update(hmac, salt, saltlen);
+		hmac_sha512_update(hmac, count, 4);
+		hmac_sha512_final(hmac, U);
+        my_cuda_memcpy_unsigned_char(T, U, len);
+		for (j = 1; j < rounds; j++)
+		{
+			hmac_sha512_update(hmac, U, hlen);
+			hmac_sha512_final(hmac, U);
+			for (k = 0; k < len; k++)
+			{
+				T[k] ^= U[k];
+			}
+		}
+		T += len;
+	}	
+}
+
+__device__ void compute_sha(const uint8_t *msg, uint32_t mlen)
+{
+	uint8_t md[SHA512_DIGESTLEN] = {0};  // Initialize to zero
+    SHA512_CTX sha;
+    sha512_init(&sha);
+    sha512_update(&sha, msg, mlen);
+    sha512_final(&sha, md);
+    printf("SHA-512: ");
+    print_as_hex(md, sizeof md);
+}
+
+__device__ void compute_hmac(const uint8_t *key, uint32_t klen, const uint8_t *msg, uint32_t mlen)
+{
+	uint8_t md[SHA512_DIGESTLEN];
+	HMAC_SHA512_CTX hmac;
+	hmac_sha512_init(&hmac, key, klen);
+	hmac_sha512_update(&hmac, msg, mlen);
+	hmac_sha512_final(&hmac, md);
+    printf("HMAC: ");
+	print_as_hex(md, sizeof md);
+}
+
+__device__ void compute_pbkdf2(
+    const uint8_t *key,
+    uint32_t klen,
+    const uint8_t *salt,
+    uint32_t slen,
+    uint32_t rounds,
+    uint32_t dklen,
+    unsigned char *derived_key
+    )
+{
+    uint8_t *dk = (uint8_t*) malloc(dklen);
+	HMAC_SHA512_CTX pbkdf_hmac;
+	pbkdf2_sha512(&pbkdf_hmac, key, klen, salt, slen, rounds, dk, dklen);
+	// printf("PBKDF2-SHA-512: ");
+	// print_as_hex(dk, dklen);
+    my_cuda_memcpy_unsigned_char(derived_key, dk, dklen);
+	free(dk);
+}
+```
+
+# bignum.h
+```
+// bignum.h
+#include <limits.h>
+#include <assert.h>
+#include <stdio.h>
+#include <stdint.h>
+
+#ifndef BN_ULONG
+#define BN_ULONG unsigned long long
+#endif
+
+#define BN_ULONG_MAX ((BN_ULONG)-1)
+
+#define debug_print false
+#define bn_mul_caching false
+#define collect_stats false
+#define BN_MASK2 0xffffffff
+#define BN_ULONG_NUM_BITS (sizeof(BN_ULONG) * 8) // 64 bits
+#define MAX_BIGNUM_SIZE 10     // Allow room for temp calculations
+#define PUBLIC_KEY_SIZE 33  // Assuming a 33-byte public key (compressed format)
+
+// Debug variables
+#define DEVICE_CLOCK_RATE 1708500
+__device__ unsigned int debug_loop_counter_bn_div = 0;  // Global loop counter variable
+__device__ double elapsed_time_bn_div = 0;
+__device__ double elapsed_time_bn_div_binary = 0;
+__device__ double elapsed_time_bn_mod_inverse = 0;
+__device__ double elapsed_time_bn_copy = 0;
+
+// Statistics module ++
+#define MAX_FUNCTIONS 100
+
+enum FunctionIndex {
+    FN_MAIN,
+    FN_BN_ADD,
+    FN_BN_SUB,
+    FN_BN_MUL,
+    FN_BN_DIV,
+    FN_BN_MOD,
+    FN_POINT_ADD,
+    FN_POINT_DOUBLE,
+    FN_EC_POINT_SCALAR_MUL,
+    FN_LEFT_SHIFT,
+    FN_CACHED_BN_MUL,
+    FN_FIND_IN_CACHE,
+    FN_COUNT
+};
+
+__device__ unsigned int g_function_calls[MAX_FUNCTIONS];
+__device__ unsigned long long g_function_times[MAX_FUNCTIONS];
+
+__device__ void record_function(FunctionIndex fn, clock_t start_time) {
+    if (!collect_stats) return;
+    clock_t end_time = clock64();
+    atomicAdd(&g_function_calls[fn], 1);
+    atomicAdd(&g_function_times[fn], end_time - start_time);
+}
+
+__device__ const char* get_function_name(FunctionIndex fn) {
+    switch(fn) {
+        case FN_MAIN: return "testKernel";
+        case FN_BN_ADD: return "bn_add";
+        case FN_BN_SUB: return "bn_sub";
+        case FN_BN_MUL: return "bn_mul";
+        case FN_BN_DIV: return "bn_div";
+        case FN_BN_MOD: return "bn_mod";
+        case FN_POINT_ADD: return "point_add";
+        case FN_POINT_DOUBLE: return "point_double";
+        case FN_EC_POINT_SCALAR_MUL: return "ec_point_scalar_mul";
+        case FN_LEFT_SHIFT: return "left_shift";
+        case FN_CACHED_BN_MUL: return "cached_bn_mul";
+        case FN_FIND_IN_CACHE: return "find_in_cache";
+        default: return "Unknown";
+    }
+}
+
+__device__ void print_performance_report() {
+    if (!collect_stats) return;
+    // Print CSV header
+    printf("Function,Calls,TotalTime(cycles)\n");
+    
+    // Print data for each function
+    for (int i = 0; i < FN_COUNT; i++) {
+        printf("%s,%u,%llu\n", 
+               get_function_name((FunctionIndex)i), 
+               g_function_calls[i], 
+               g_function_times[i]);
+    }
+}
+// Statistics module --
+
+typedef struct bignum_st {
+  BN_ULONG d[MAX_BIGNUM_SIZE];
+  unsigned char top;
+  bool neg;
+} BIGNUM;
+
+// Global zero-initialized BIGNUM
+__device__ const BN_ULONG ZERO_ARRAY[MAX_BIGNUM_SIZE] = {0};
+__device__ const BIGNUM ZERO_BIGNUM = {
+    {0},                  // d (will be properly initialized in init_zero)
+    1,                    // top (unsigned char)
+    0                    // neg (bool)
+};
+
+// Initialize BIGNUM
+__device__ void init_zero(BIGNUM *bn) {
+    *bn = ZERO_BIGNUM;
+}
+
+__device__ unsigned char find_top(const BIGNUM *bn) {
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= 0; i--) {
+        if (bn->d[i] != 0) {
+            return i + 1;
+        }
+    }
+    return 1;
+}
+
+__device__ unsigned char find_top_optimized(const BIGNUM *bn, const char start_index) {
+    const char start = start_index > MAX_BIGNUM_SIZE ? MAX_BIGNUM_SIZE : start_index;
+    for (char i = start - 1; i >= 0; i--) {
+        if (bn->d[i] != 0) {
+            return i + 1;
+        }
+    }
+    return 1;
+}
+
+__device__ void free_bignum(BIGNUM *bn) {
+    delete[] bn->d;
+}
+
+__device__ void bn_print(const char* msg, BIGNUM* a) {
+    if (!debug_print) return;
+    
+    printf("%s", msg);
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= 0; i--) {
+        // Print words up to top - 1 with appropriate formatting
+        if (i == MAX_BIGNUM_SIZE - 1) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf("%016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void bn_print_constant(const char* msg, BIGNUM* a, int tid) {
+    printf("Thread %d - %s", tid, msg);
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= 0; i--) {
+        // Print words up to top - 1 with appropriate formatting
+        if (i == MAX_BIGNUM_SIZE - 1) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf("%016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void print_as_hex(const uint8_t *data, const uint32_t len) {
+    for (uint32_t i = 0; i < len; i++) {
+        printf("%02x", data[i]);
+    }
+    printf("\n");
+}
+
+__device__ bool bn_add(BIGNUM *result, BIGNUM *a, BIGNUM *b);
+__device__ int bn_mod(BIGNUM *r, BIGNUM *m, BIGNUM *d);
+__device__ bool bn_is_zero(BIGNUM *a);
+
+__device__ size_t bn_strlen(const char *str) {
+    size_t len = 0;
+    while (*str != '\0') {
+        ++len;
+        ++str;
+    }
+    return len;
+}
+
+__device__ void bn_strcpy(char *dest, const char *src) {
+    size_t i = 0;
+    while (src[i] != '\0') {
+        dest[i] = src[i];
+        ++i;
+    }
+    dest[i] = '\0';
+}
+
+__device__ void print_as_hex_char(unsigned char *data, int len) {
+    if (debug_print) {
+        for (int i = 0; i < len; i++) {
+            printf("%02x", data[i]);
+        }
+        printf("\n");
+    }
+}
+
+__device__ void bn_print_short(const char* msg, BIGNUM* a) {
+    if (!debug_print) return;
+    printf("%s", msg);
+    if (a->top == 0) {
+        printf("0\n");  // Handle the case where BIGNUM is zero
+        return;
+    }
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = a->top - 1; i >= 0; i--) {
+        // Print words up to top - 1 with appropriate formatting
+        if (i == a->top - 1) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf("%016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void bn_print_reversed(const char* msg, BIGNUM* a) {
+    if (!debug_print) return;
+    printf("%s", msg);
+    if (a->top == 0) {
+        printf("0\n");  // Handle the case where BIGNUM is zero
+        return;
+    }
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = 0; i < a->top; i++) {
+        if (i == 0) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf(" %016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void debug_printf(const char *fmt, ...) {
+    if (debug_print) {
+        printf(fmt);
+    }
+}
+
+__device__ BN_ULONG bn_sub_words(BN_ULONG* r, const BN_ULONG* a, const BN_ULONG* b, const int n) {
+  
+  BN_ULONG borrow = 0;
+  for (int i = 0; i < n; i++) {
+    BN_ULONG t1 = a[i];
+    BN_ULONG t2 = b[i];
+    BN_ULONG w = (t1 - borrow) - t2;
+    borrow = (w > t1); // handle borrow
+    r[i] = w; 
+  }
+
+  return borrow;
+}
+
+__device__ void reverse(BN_ULONG* d, int n) {
+  BN_ULONG tmp;
+  for(int i=0; i < n/2; i++) {
+    tmp = d[i];
+    d[i] = d[n - i - 1];
+    d[n - i - 1] = tmp; 
+  }
+}
+
+__device__ void init_one(BIGNUM *bn) {
+    // Initialize the BIGNUM to zero
+    *bn = ZERO_BIGNUM;
+    
+    // Set the least significant word to 1
+    bn->d[0] = 1;
+    
+    // Set the top to 1 (as there is one significant digit)
+    bn->top = 1;
+}
+
+__device__ int bn_cmp(BIGNUM* a, BIGNUM* b) {
+    // -1: a < b
+    // 0: a == b
+    // 1: a > b
+    if (a->neg != b->neg) {
+        return a->neg ? -1 : 1;
+    }
+    // a->top = find_top(a);
+    b->top = find_top(b);
+    if (a->top != b->top) {
+        return a->top > b->top ? 1 : -1;
+    }
+
+    for (int i = a->top - 1; i >= 0; i--) {
+        if (a->d[i] != b->d[i]) {
+            return a->d[i] > b->d[i] ? 1 : -1;
+        }
+    }
+
+    return 0;
+}
+
+__device__ int bn_cmp_abs(BIGNUM *a, BIGNUM *b) {
+    if (a->top > b->top)
+        return 1;
+    if (b->top > a->top)
+        return -1;
+
+    for (int i = a->top - 1; i >= 0; i--) {
+        if (a->d[i] > b->d[i])
+            return 1;
+        if (b->d[i] > a->d[i])
+            return -1;
+    }
+    return 0;
+}
+
+__device__ int bn_cmp_one(BIGNUM* a) {
+    int a_top = a->top - 1;
+
+    // Skip leading zeroes to find the actual top for a.
+    // Though theoretically, since we are comparing against 1, there shouldn't be leading zeroes. This is for safety.
+    while (a_top >= 0 && a->d[a_top] == 0) a_top--;
+
+    // a cannot be one if it's negative or if it has more than one significant digit that isn't zero
+    if (a->neg || a_top != 0) { 
+        return (a->neg) ? -1 : 0; // Return -1 if a is negative, indicating a is less than one;
+                                  // otherwise, return 0 as an indication of inequality
+    }
+
+    // At this point, a_top should be 0 (indicating only one significant digit), and a should be positive
+    // Now, directly compare a->d[0] with 1
+    if (a->d[0] > 1) return 1;  // a is greater than one
+    if (a->d[0] < 1) return -1; // a is less than one
+
+    return 0; // a is equal to one
+}
+
+// Helper function to perform a deep copy of BIGNUM
+__device__ void bn_copy(BIGNUM *dest, BIGNUM *src) {
+    // Declare variable to store clock() value
+    clock_t start, end;
+    // Start the clock
+    start = clock64();    
+
+    // Init dst as zero
+    init_zero(dest);
+
+    if (dest == nullptr || src == nullptr) {
+        return;
+    }
+
+    // Copy the neg and top fields
+    dest->neg = src->neg;
+    dest->top = src->top;
+
+    int i;
+
+    // Copy the array of BN_ULONG digits.
+    for (i = 0; i < src->top; i++) {
+        dest->d[i] = src->d[i];
+    }
+
+    // Set the rest of the words in dest to 0 if dest's top is larger
+    for (i = src->top; i < MAX_BIGNUM_SIZE; i++) {
+        dest->d[i] = 0;
+    }
+   
+    // End the clock
+    end = clock64();
+    // Calculate the elapsed time
+    elapsed_time_bn_copy += (double)(end - start);
+}
+
+__device__ void absolute_add(BIGNUM *result, const BIGNUM *a, const BIGNUM *b) {
+    // Determine the maximum size to iterate over
+    unsigned char max_top = max(a->top, b->top);
+    BN_ULONG carry = 0;
+
+    unsigned char i;
+
+    // Initialize result
+    for (i = 0; i <= max_top; ++i) {
+        result->d[i] = 0;
+    }
+    result->top = max_top;
+
+    for (i = 0; i <= max_top; ++i) {
+        // Extract current words or zero if one bignum is shorter
+        BN_ULONG ai = (i < a->top) ? a->d[i] : 0;
+        BN_ULONG bi = (i < b->top) ? b->d[i] : 0;
+
+        // Calculate sum and carry
+        BN_ULONG sum = ai + bi + carry;
+
+        // Store result
+        result->d[i] = sum; // No need for masking as BN_ULONG is already the correct size
+
+        // Calculate carry
+        carry = (sum < ai) || (carry > 0 && sum == ai) ? 1 : 0;
+    }
+
+    // Handle carry out, expand result if necessary
+    if (carry > 0) {
+        if (result->top < MAX_BIGNUM_SIZE - 1) {
+            result->d[result->top] = carry;
+            result->top++;
+        } else {
+            // Handle error: Result BIGNUM doesn't have space for an additional word.
+            // This should potentially be reported back to the caller.
+        }
+    }
+
+    // Find the real top after addition (no leading zeroes)
+    result->top = find_top_optimized(result, max_top+1);
+}
+
+__device__ void absolute_subtract(BIGNUM *result, BIGNUM *a, BIGNUM *b) {
+
+    unsigned char max_top = max(a->top, b->top);
+    BN_ULONG borrow = 0;
+    result->top = max_top;
+
+    for (unsigned char i = 0; i < max_top; ++i) {
+        BN_ULONG ai = (i < a->top) ? a->d[i] : 0;
+        BN_ULONG bi = (i < b->top) ? b->d[i] : 0;
+
+        // Perform subtraction
+        BN_ULONG diff = ai - bi - borrow;
+        
+        // Check if borrow occurred
+        if (ai < bi || (borrow && ai == bi)) {
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+
+        result->d[i] = diff;
+    }
+
+    // Normalize the result (remove leading zeros)
+    while (result->top > 0 && result->d[result->top - 1] == 0) {
+        result->top--;
+    }
+
+    // If the result is zero, ensure top is set to 1 and d[0] is 0
+    if (result->top == 0) {
+        result->top = 1;
+        result->d[0] = 0;
+    }
+}
+
+__device__ bool bn_subtract(BIGNUM *result, BIGNUM *a, BIGNUM *b) {
+    clock_t start = clock64();
+    // If one is negative and the other is positive, it's essentially an addition.
+    if (a->neg != b->neg) {
+        result->neg = a->neg; // The sign will be the same as the sign of 'a'.
+        absolute_add(result, a, b); // Perform the addition of magnitudes here because signs are different.
+        record_function(FN_BN_SUB, start);
+        return true;
+    }
+
+    // Compare the absolute values to decide the order of subtraction and sign of the result.
+    int cmp_res = bn_cmp_abs(a, b); // This function should compare the absolute values of 'a' and 'b'.
+    
+    if (cmp_res >= 0) {
+        // |a| >= |b|, perform a - b, result takes sign from 'a'.
+        result->neg = a->neg;
+        absolute_subtract(result, a, b);
+    } else {
+        // |b| > |a|, perform b - a instead, result takes opposite sign from 'a'.
+        result->neg = !a->neg;
+        absolute_subtract(result, b, a);
+    }
+
+    // Perform additional logic if underflow has been detected in absolute_subtract.
+    if (result->top == 0) { 
+        // Handle underflow if needed. 
+    }
+    record_function(FN_BN_SUB, start);
+    return true;
+}
+
+__device__ int absolute_compare(const BIGNUM* a, const BIGNUM* b) {
+    // absolute_compare logic:
+    //  1 when |a| is larger
+    // -1 when |b| is larger
+    //  0 when |a| and |b| are equal in absolute value
+
+    // Skip leading zeros and find the actual top for a
+    int a_top = a->top - 1;
+    while (a_top >= 0 && a->d[a_top] == 0) a_top--;
+
+    // Skip leading zeros and find the actual top for b
+    int b_top = b->top - 1;
+    while (b_top >= 0 && b->d[b_top] == 0) b_top--;
+
+    // Compare actual tops
+    if (a_top > b_top) return 1; // |a| is larger
+    if (a_top < b_top) return -1; // |b| is larger
+
+    // Both numbers have the same number of significant digits, compare digit by digit
+    for (int i = a_top; i >= 0; i--) {
+        if (a->d[i] > b->d[i]) return 1; // |a| is larger
+        if (a->d[i] < b->d[i]) return -1; // |b| is larger
+    }
+    return 0; // |a| and |b| are equal in absolute value
+}
+
+__device__ void bn_add_private(BIGNUM* a, BIGNUM* b, BIGNUM* r) {
+    int max = a->top > b->top ? a->top : b->top;
+    BN_ULONG carry = 0;
+    printf("Starting addition... max: %d\n", max);
+
+    for(int i=max-1; i>=0; i--) {
+        BN_ULONG ai = (i < a->top) ? a->d[i] : 0;
+        BN_ULONG bi = (i < b->top) ? b->d[i] : 0;
+
+        BN_ULONG sum = ai + bi + carry;
+        r->d[i] = sum;
+        carry = (sum < ai || (sum - ai) < bi) ? 1 : 0;
+    }
+
+    // If there's a carry after processing all words
+    if (carry) {
+        r->top = max + 1;
+        for (int i = r->top-1; i > 0; i--) {   // Shift every word to the right
+            r->d[i] = r->d[i-1];
+        }
+        r->d[0] = carry;  // Place the carry on the leftmost side
+    } else {
+        r->top = max;
+    }
+}
+
+__device__ bool bn_add(BIGNUM *result, BIGNUM *a, BIGNUM *b) {
+    clock_t start = clock64();
+    init_zero(result);
+    unsigned char max_top = max(a->top, b->top);
+
+    if (a->neg == b->neg) {
+        // Both numbers have the same sign, so we can directly add them.
+        absolute_add(result, a, b);
+        result->neg = a->neg; // The sign will be the same as both operands.
+    } else {
+        // The numbers have different signs, so we need to compare their absolute values to decide on the operation.
+        int cmp_result = absolute_compare(a, b);
+        if (cmp_result < 0) {
+            // |b| is greater than |a|, so we'll do b - a and assign the sign of b to the result.
+            absolute_subtract(result, b, a);
+            result->neg = b->neg;
+        } else if (cmp_result > 0) {
+            // |a| is greater than |b|, so we'll do a - b and assign the sign of a to the result.
+            absolute_subtract(result, a, b);
+            result->neg = a->neg;
+        } else {
+            // |a| is equal to |b|, so the result is 0.
+            // The result of adding two numbers with different signs but equal magnitude is 0.
+            result->neg = 0; // Set sign to 0 for non-negative.
+            result->top = 1; // The result is 0, so top is 1 to denote one valid word which is zero.
+            result->d[0] = 0;
+        }
+    }
+
+    record_function(FN_BN_ADD, start);
+    return true;
+}
+
+__device__ void big_num_add_mod(BN_ULONG *result, BN_ULONG *a, BN_ULONG *b, BN_ULONG *n, int num_words) {
+    BN_ULONG carry = 0;
+    for (int i = num_words - 1; i >= 0; i--) {
+        BN_ULONG sum = a[i] + b[i] + carry;
+        carry = (sum < a[i]) || (carry > 0 && sum == a[i]) ? 1 : 0;
+        result[i] = sum;
+    }
+
+    // Modular reduction: simply subtract n from result if result >= n
+    bool greater_or_equal = true;
+    for (int i = 0; i < num_words; i++) {
+        if (result[i] < n[i]) {
+            greater_or_equal = false;
+            break;
+        }
+        if (result[i] > n[i]) break;
+    }
+
+    if (greater_or_equal) {
+        // At this point, we know result >= n, so perform result -= n
+        carry = 0;
+        for (int i = num_words - 1; i >= 0; i--) {
+            BN_ULONG diff = result[i] - n[i] - carry;
+            carry = (result[i] < n[i]) || (carry > 0 && result[i] == n[i]) ? 1 : 0;
+            result[i] = diff;
+        }
+    }
+}
+
+__device__ void robust_BN_nnmod(BIGNUM *r, BIGNUM *m, BIGNUM *d) {
+    // Copy m into r
+    bn_copy(r, m);
+    r->neg = 0;  // Result is non-negative
+
+    // Now we'll reduce r modulo d, using simple division
+    for (int i = 0; i < r->top; ++i) {
+        if (r->d[i] >= d->d[0]) {
+            BN_ULONG quotient = r->d[i] / d->d[0];
+            BN_ULONG remainder = r->d[i] % d->d[0];
+
+            // Subtract quotient*d from r
+            BN_ULONG borrow = 0;
+            for (int j = 0; j < d->top && i+j < r->top; ++j) {
+                unsigned long long sub = (unsigned long long)r->d[i+j] + BN_ULONG_MAX + 1 - 
+                                         (unsigned long long)d->d[j] * quotient - borrow;
+                r->d[i+j] = (BN_ULONG)sub;
+                borrow = (sub <= BN_ULONG_MAX) ? 1 : 0;
+            }
+
+            // Add back the remainder at position i
+            unsigned long long sum = (unsigned long long)r->d[i] + remainder;
+            r->d[i] = (BN_ULONG)sum;
+            BN_ULONG carry = (sum > BN_ULONG_MAX) ? 1 : 0;
+
+            // Propagate any carry
+            for (int j = i+1; j < r->top && carry; ++j) {
+                sum = (unsigned long long)r->d[j] + carry;
+                r->d[j] = (BN_ULONG)sum;
+                carry = (sum > BN_ULONG_MAX) ? 1 : 0;
+            }
+
+            // If there's still a carry, increase the size of r
+            if (carry && r->top < MAX_BIGNUM_SIZE) {
+                r->d[r->top] = carry;
+                r->top++;
+            }
+        }
+    }
+
+    // Ensure the result is smaller than d
+    while (bn_cmp(r, d) >= 0) {
+        bn_subtract(r, r, d);
+    }
+}
+
+// Public key derivation ++
+__device__ int bn_div(BIGNUM *a, BIGNUM *b, BIGNUM *q, BIGNUM *r);
+__device__ void bn_mul(BIGNUM *a, BIGNUM *b, BIGNUM *product);
+// bn_mul cache ++
+#define MAX_CACHE_SIZE 320
+
+typedef struct {
+    BN_ULONG key;
+    BIGNUM value;
+    int valid;
+} CacheEntry;
+
+typedef struct {
+    CacheEntry entries[MAX_CACHE_SIZE];
+} Cache;
+
+__device__ unsigned int hash(BN_ULONG key) {
+    return key % MAX_CACHE_SIZE;
+}
+
+__device__ void cache_init(Cache* cache) {
+    memset(cache, 0, sizeof(Cache));
+}
+
+__device__ void cache_set(Cache* cache, BN_ULONG key, BIGNUM* value) {
+    unsigned int index = hash(key);
+    cache->entries[index].key = key;
+    cache->entries[index].value = *value;
+    cache->entries[index].valid = 1;
+}
+
+__device__ int cache_get(Cache* cache, BN_ULONG key, BIGNUM* value) {
+    clock_t start = clock64();
+    unsigned int index = hash(key);
+    if (cache->entries[index].valid && cache->entries[index].key == key) {
+        *value = cache->entries[index].value;
+        record_function(FN_CACHED_BN_MUL, start);
+        return 1;
+    }
+    record_function(FN_CACHED_BN_MUL, start);
+    return 0;
+}
+
+__device__ void set_bn(BIGNUM *dest, const BIGNUM *src) {
+    debug_printf("set_bn 0\n");
+
+    // Check if dest has enough space to copy from src
+    if (MAX_BIGNUM_SIZE < src->top) {    
+        // Handle the situation appropriately
+        // Depending on how memory is managed, this could be an error or resize operation
+        return;
+    }
+
+    // Copy over the significant words from source to destination.
+    for (int i = 0; i < src->top; ++i) {
+        debug_printf("set_bn 1.%d\n", i);
+        dest->d[i] = src->d[i];
+    }
+
+    // Zero out any remaining entries in the array if the source 'top' is less than the dest 'dmax'
+    for (int i = src->top; i < MAX_BIGNUM_SIZE; ++i) {
+        debug_printf("set_bn 2.%d\n", i);
+        dest->d[i] = 0;
+    }
+
+    debug_printf("set_bn 3\n");
+
+    // Set the 'top' and 'neg' flags after zeroing
+    dest->top = src->top;
+    dest->neg = src->neg;
+}
+
+
+
+// Assuming 'a' and 'mod' are coprime, output 'x' such that: a*x ≡ 1 (mod 'mod')
+// Pseudo code for Extended Euclidean Algorithm in CUDA
+__device__ int extended_gcd(BIGNUM *a, BIGNUM *mod, BIGNUM *x, BIGNUM *y) {
+    // Initialization of prev_x, x, last_y, and y is omitted here but important.
+    BIGNUM prev_x, last_y, last_remainder, remainder, quotient, temp;
+    // Initialize prev_x = 1, x = 0, last_y = 0, y = 1 
+    // Initialize last_remainder = mod, remainder = a
+
+    // Initialize a BIGNUM for zero.
+    BIGNUM zero;
+    init_zero(&zero);
+    BIGNUM temp_remainder;
+    init_zero(&temp_remainder);
+
+    while (bn_cmp(&remainder, &zero) != 0) {
+        bn_div(&last_remainder, &remainder, &quotient, &temp_remainder);
+        BIGNUM swap_temp = last_remainder; // Temporary storage for the swap
+        bn_copy(&last_remainder, &temp_remainder);
+        bn_copy(&temp_remainder, &swap_temp);
+
+        bn_mul(&quotient, x, &temp); // temp = quotient*x
+        bn_subtract(&prev_x, &temp, &prev_x); // new prev_x = prev_x - temp
+        bn_mul(&quotient, y, &temp); // temp = quotient*y
+        bn_subtract(&last_y, &temp, &last_y); // new last_y = last_y - temp
+    }
+
+    // Clean up
+    delete &temp_remainder; // Only if dynamic memory is allowed - if you statically allocated, this is unnecessary
+    
+    set_bn(x, &prev_x);
+    set_bn(y, &last_y);
+
+    return 1; // In this simplified version, we'd return the gcd, but we're presuming a==1
+}
+
+__device__ void mod_inv(BIGNUM *value, BIGNUM *mod, BIGNUM *inv) {
+    debug_printf("mod_inv 0\n");
+    BIGNUM x, y;
+    // You need to make sure that BIGNUM x, y are initialized properly with minted memory
+    // You also need a proper gcd implementation on GPU here.
+    int g = extended_gcd(value, mod, &x, &y);
+    
+    // In case x is negative, we add mod to it, assuming mod>0
+    if (x.neg) {
+        debug_printf("mod_inv a.0\n");
+        // BN_ULONG zero = 0;
+        bn_add(&x, mod, inv);
+        debug_printf("mod_inv a.1\n");
+        bn_mod(inv, mod, inv);
+        debug_printf("mod_inv a.2\n");
+    } else {
+        debug_printf("mod_inv b.0\n");
+        bn_mod(&x, mod, inv);
+        debug_printf("mod_inv b.1\n");
+    }
+}
+
+__device__ void bn_mul_unoptimized(BIGNUM *a, BIGNUM *b, BIGNUM *product) {
+    clock_t start = clock64();
+    init_zero(product);
+    
+    // Perform multiplication of each word of a with each word of b
+    for (int i = 0; i < a->top; ++i) {
+        unsigned long long carry = 0;
+        for (int j = 0; j < b->top || carry != 0; ++j) {
+            unsigned long long alow = a->d[i];
+            unsigned long long blow = (j < b->top) ? b->d[j] : 0;
+            unsigned long long lolo = alow * blow;
+            unsigned long long lohi = __umul64hi(alow, blow);
+            // Corrected handling: 
+            unsigned long long sumLow = product->d[i + j] + lolo;
+            unsigned long long carryLow = (sumLow < product->d[i + j]) ? 1 : 0; // overflowed?
+
+            unsigned long long sumHigh = sumLow + carry;
+            unsigned long long carryHigh = (sumHigh < sumLow) ? 1 : 0; // overflowed?
+
+            product->d[i + j] = sumHigh;
+
+            // Aggregate carry: contributions from high multiplication and overflows
+            carry = lohi + carryLow + carryHigh;
+        }
+        // Store final carry if it exists
+        if (carry != 0) {
+            product->d[i + b->top] = carry;
+        }
+    }
+
+    // Update the top to reflect the number of significant words in the product
+    product->top = 0;
+    for(int i = a->top + b->top - 1; i >= 0; --i) {
+        if(product->d[i] != 0) {
+            product->top = i + 1;
+            break;
+        }
+    }
+
+    // If the result has no significant words, ensure that top is at least 1
+    if(product->top == 0)
+        product->top = 1;
+    
+    // Determine if the result should be negative
+    product->neg = (a->neg != b->neg) ? 1 : 0;
+    record_function(FN_BN_MUL, start);
+}
+
+__device__ void bn_mul(BIGNUM *a, BIGNUM *b, BIGNUM *product) {
+    init_zero(product);
+    
+    for (int i = 0; i < a->top; ++i) {
+        unsigned int a_lo = (unsigned int)(a->d[i]);
+        unsigned int a_hi = (unsigned int)(a->d[i] >> 32);
+        unsigned long long carry = 0;
+        for (int j = 0; j < b->top || carry != 0; ++j) {
+            unsigned int b_lo = (unsigned int)((j < b->top) ? b->d[j] : 0);
+            unsigned int b_hi = (unsigned int)(((j < b->top) ? b->d[j] : 0) >> 32);
+
+            // Perform multiplication using 32-bit halves
+            unsigned long long lo_lo = (unsigned long long)a_lo * b_lo;
+            unsigned long long lo_hi = (unsigned long long)a_lo * b_hi;
+            unsigned long long hi_lo = (unsigned long long)a_hi * b_lo;
+            unsigned long long hi_hi = (unsigned long long)a_hi * b_hi;
+
+            // Combine the results
+            unsigned long long temp = product->d[i + j] + (lo_lo & 0xFFFFFFFF) + (carry & 0xFFFFFFFF);
+            unsigned long long new_carry = (temp >> 32) + (lo_lo >> 32) + (lo_hi & 0xFFFFFFFF) + (hi_lo & 0xFFFFFFFF) + (carry >> 32);
+            product->d[i + j] = (temp & 0xFFFFFFFF) | (new_carry << 32);
+            carry = (new_carry >> 32) + (lo_hi >> 32) + (hi_lo >> 32) + hi_hi;
+        }
+        if (carry != 0) {
+            product->d[i + b->top] = carry;
+        }
+    }
+    
+    // Update the top
+    product->top = a->top + b->top;
+    while (product->top > 1 && product->d[product->top - 1] == 0) {
+        --product->top;
+    }
+    product->neg = a->neg ^ b->neg;
+}
+
+__device__ void bn_add_bit(BIGNUM *a, int bit_index) {
+    // Determine the word in the array where this bit resides.
+    int word_index = bit_index / (sizeof(BN_ULONG) * 8);
+    int bit_in_word = bit_index % (sizeof(BN_ULONG) * 8);
+
+    // Set this bit. BN_ULONG is assumed to be large enough to handle the shifts without overflow.
+    BN_ULONG bit_to_set = ((BN_ULONG)1) << bit_in_word;
+
+    // Add the bit to the BIGNUM. This is safe from overflow because we're only setting one bit.
+    a->d[word_index] |= bit_to_set;
+
+    // Update 'top'. If we added a bit beyond the current 'top', we'll need to expand it.
+    if (word_index >= a->top) {
+        // Make sure we've added a bit that's not in the leading zeroes of the BIGNUM.
+        // If so, `top` needs to reflect this new significant word.
+        a->top = word_index + 1;
+
+        // Ensure all bits above the current one are set to 0 in the new top 'word'.
+        for (int i = bit_in_word + 1; i < sizeof(BN_ULONG) * 8; i++) {
+            a->d[word_index] &= ~(((BN_ULONG)1) << i);
+        }
+    }
+}
+
+__device__ int bn_is_bit_set(const BIGNUM *bn, int bit_index) {
+    // Check if the bit index is within the range of the BIGNUM's length
+    if (bit_index < 0 || bit_index >= bn->top * BN_ULONG_NUM_BITS) {
+        return 0; // Bit out of range, return 0 indicating not set
+    }
+
+    // Calculate which word and which bit within that word we are interested in
+    int word_index = bit_index / BN_ULONG_NUM_BITS;
+    int bit_position = bit_index % BN_ULONG_NUM_BITS;
+
+    // Create a mask for the bit within the word
+    BN_ULONG mask = (BN_ULONG)1 << bit_position;
+
+    // Check if the bit is set and return the appropriate value
+    return (bn->d[word_index] & mask) ? 1 : 0;
+}
+
+__device__ int bn_mod_mpz(BIGNUM *r, BIGNUM *m, BIGNUM *d) {    
+    // Check if r and d are the same pointer
+    if (r == d) {
+        printf("bn_mod: ERR_R_PASSED_INVALID_ARGUMENT\n");
+        return 0;
+    }
+
+    // Create a temporary BIGNUM to store the divisor
+    BIGNUM temp_divisor;
+    init_zero(&temp_divisor);
+
+    // Copy the divisor to the temporary BIGNUM
+    if (r == d) {
+        bn_copy(&temp_divisor, d);
+        d = &temp_divisor;
+    }
+
+    // Perform the division
+    if (!bn_div(NULL, r, m, d)) {
+        return 0;
+    }
+
+    // Adjust the sign of the remainder if necessary
+    if (r->neg) {
+        // If the remainder is negative, add the absolute value of the divisor
+        if (d->neg) {
+            if (!bn_subtract(r, r, d)) {
+                return 0;
+            }
+        } else {
+            if (!bn_add(r, r, d)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+__device__ int bn_mod(BIGNUM *r, BIGNUM *a, BIGNUM *n) {
+    // r: Remainder (updated)
+    // a: Dividend
+    // n: Modulus
+    bool debug = 0;
+    BIGNUM q;
+    init_zero(&q);
+
+    if (r == n) {
+        printf("bn_mod: ERR_R_PASSED_INVALID_ARGUMENT");
+        return 0;
+    }
+    if (!bn_div(&q, r, a, n)) {
+        return 0;
+    }
+
+    BIGNUM tmp;
+    init_zero(&tmp);
+
+    if (r->neg) {
+        if (debug) printf("r is negative\n");
+        bool result;
+        // If the remainder is negative, add the absolute value of the divisor
+        if (n->neg) {
+            if (debug) printf("d is negative\n");
+            result = bn_subtract(&tmp, r, n); // tmp = r - n
+            if (!result) {
+                return 0;
+            }
+            // copy tmp to r
+            bn_copy(r, &tmp);
+        } else {
+            if (debug) printf("d is not negative\n");
+            result = bn_add(&tmp, r, n); // tmp = r + n            
+            if (!result) {
+                return 0;
+            }
+            // copy tmp to r
+            bn_copy(r, &tmp);
+        }
+    }
+    if (debug) bn_print("<< r bn_mod: ", r);
+    if (debug) printf("-- bn_mod --\n");
+    return 1;
+}
+
+__device__ void mod_mul(BIGNUM *a, BIGNUM *b, BIGNUM *mod, BIGNUM *result) {
+    debug_printf("mod_mul 0\n");
+    BIGNUM product;
+    init_zero(&product);
+    debug_printf("mod_mul 1\n");
+    // Now, you can call the bn_mul function and pass 'product' to it
+    bn_mul(a, b, &product);
+    debug_printf("mod_mul 2\n");
+    
+    
+    bn_mod(&product, mod, result);
+
+    debug_printf("mod_mul 3\n");
+}
+
+__device__ bool bn_is_zero(BIGNUM *a) {
+    for (int i = 0; i < a->top; ++i) {
+        if (a->d[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__device__ bool bn_is_one(BIGNUM *a) {
+    // Assuming that BIGNUM stores the number in an array 'd' of integers
+    // and 'top' indicates the number of chunks being used.
+    // We also assume that 'd' is big-endian and 'top' is the index of the highest non-zero digit.
+    
+    // The number one would be represented with only the least significant digit being one
+    // and all other digits being zero.
+    if (a->top != 1) {  // If there are more than one digits in use, it cannot be one
+        return false;
+    }
+    if (a->d[0] != 1) {  // The number one should only have the least significant digit set to one
+        return false;
+    }
+    // Ensure that any other digits (if they exist in memory) are zero
+    // This isn't strictly necessary if the 'top' index is always accurate
+    // but is a good sanity check if there's any possibility of memory corruption or improper initialization.
+    for (int i = 1; i < MAX_BIGNUM_SIZE; ++i) {
+        if (a->d[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__device__ int bn_is_negative(const BIGNUM *a) {
+    // Assuming the neg field is defined and holds the sign (0 for non-negative, 1 for negative)
+    return a->neg != 0;
+}
+
+__device__ void bn_set_word(BIGNUM *bn, BN_ULONG word) {
+    // Assuming d is a pointer to an array where the BIGNUM's value is stored
+    // and top is an integer representing the index of the most significant word + 1
+    // Setting a BIGNUM to a single-word value means that all other words are zero.
+
+    // Clear all words in the BIGNUM
+    for (int i = 0; i < MAX_BIGNUM_SIZE; ++i) {
+        bn->d[i] = 0;
+    }
+
+    // Set the least significant word to the specified value
+    bn->d[0] = word;
+
+    // Update top to indicate that there's at least one significant digit
+    bn->top = (word == 0) ? 0 : 1;
+
+    // If using a sign flag, ensure the BIGNUM is set to non-negative
+    if (bn->top) {
+        bn->neg = 0;
+    }
+}
+
+__device__ int get_msb_bit(BIGNUM *n) {
+    if (n->top == 0) return -1; // All zero
+
+    BN_ULONG word = n->d[n->top - 1]; 
+    if (word == 0) return -1; // Top word should not be zero 
+
+    // Use __clzll to count the leading zeros in the most significant word
+    unsigned int leading_zeros = __clzll(word);
+
+    // The position of the most significant bit is the number of bits in the word
+    // minus the number of leading zeros
+    return (n->top - 1) * BN_ULONG_NUM_BITS + (BN_ULONG_NUM_BITS - 1 - leading_zeros);
+}
+
+__device__ void bn_init_for_shift(BIGNUM *result, BIGNUM *a, int shift) {
+    // Calculate the number of words needed for the result after the shift.
+    int extra_word = (get_msb_bit(a) + shift) / BN_ULONG_NUM_BITS;
+    int new_top = a->top + extra_word;
+
+    // Ensure result has enough space to hold the new value.
+    // It should at least match the new_top or be the maximum allowed by MAX_BIGNUM_SIZE.
+    unsigned char result_dmax = min(new_top, MAX_BIGNUM_SIZE);
+
+    // Initialize the 'result' words to zero.
+    for (int i = 0; i < result_dmax; i++) {
+        result->d[i] = 0;
+    }
+
+    // Set the 'top' field for 'result'.
+    result->top = 0; // Will be set correctly in bn_lshift_res
+}
+
+
+__device__ void bn_lshift_res(BIGNUM *result, BIGNUM *a, int shift) {
+    bn_init_for_shift(result, a, shift);
+    if (shift <= 0) {
+        // No shift or invalid shift count; copy input to output with no modifications.
+        bn_copy(result, a);
+        return;
+    }
+
+    // Initialize result BIGNUM according to your BIGNUM structure definition
+    // Make sure that result->d has enough space to hold the result
+
+    // Perform the shift for each word from the least significant upwards.
+    BN_ULONG carry = 0;
+    for (int i = 0; i < a->top; ++i) {
+        BN_ULONG new_carry = a->d[i] >> (BN_ULONG_NUM_BITS - shift); // Capture the bits that will be shifted out.
+        result->d[i] = (a->d[i] << shift) | carry; // Shift current word and add bits from previous carry.
+        carry = new_carry; // Update carry for the next iteration.
+    }
+
+    // Assign the carry to the new most significant word if needed.
+    if (carry != 0) {
+        result->d[a->top] = carry; // Assign the carry to the new most significant word.
+        result->top = a->top + 1;
+    } else {
+        result->top = a->top;
+    }
+
+    // Initialize any remaining higher-order words to zero if necessary
+    // This depends on the internals of your BIGNUM structure.
+    for (int i = result->top; i < MAX_BIGNUM_SIZE; ++i) {
+        result->d[i] = 0;
+    }
+}
+
+__device__ void bn_rshift_one(BIGNUM *bn) {
+    if (bn_is_zero(bn)) {
+        return; // If the big number is zero, there's nothing to shift
+    }
+
+    BN_ULONG carry = 0;
+    for (int i = bn->top - 1; i >= 0; --i) {
+        // Take the current digit and the previous carry to create a composite
+        BN_ULONG composite = (carry << (BN_ULONG_NUM_BITS - 1)) | (bn->d[i] >> 1);
+        carry = bn->d[i] & 1; // Save the LSB before shifting as the next carry
+        bn->d[i] = composite;
+    }
+
+    // If the most significant digit is now zero, update the `top` counter
+    if (bn->top > 0 && bn->d[bn->top - 1] == 0) {
+        bn->top--;
+    }
+}
+
+// Helper function to get the index of the MSB within a single word
+__device__ int get_msb_index(BN_ULONG word) {
+    // This is a simple example using a linear scan; this can be made more efficient, for example,
+    // by using the built-in __clz() or similar instructions specific to your architecture.
+    for (int i = BN_ULONG_NUM_BITS - 1; i >= 0; --i) {
+        if ((word >> i) & 1) {
+            return i;
+        }
+    }
+    return -1;  // if the word is zero, return -1 or another error indicator
+}
+
+__device__ int bn_get_top_bit(BIGNUM *bn) {
+    // Start scanning from the most significant word
+    for (int i = bn->top - 1; i >= 0; --i) {
+        int msb_index = get_msb_index(bn->d[i]);
+        if (msb_index != -1) {  // If a bit is set in this word
+            //return i * WORD_BITS + msb_index;  // Return the global index of the MSB
+            return i * BN_ULONG_NUM_BITS + msb_index;  // Return the global index of the MSB
+        }
+    }
+    // If no bit is set in any word, this represents the number zero, and there is no MSB.
+    return -1;  // The number is zero, so return -1 or another error indicator
+}
+
+__device__ int bn_get_top_bit_word(BN_ULONG word) {
+    if (word == 0) return -1; // Special case if the word is zero
+    
+    // Find the most significant bit (MSB) set
+    int bit_index = 0;
+    for (int i = BN_ULONG_NUM_BITS - 1; i >= 0; --i) {
+        if (word & ((BN_ULONG)1 << i)) {
+            bit_index = i;
+            break;
+        }
+    }
+    return bit_index;
+}
+
+__device__ void bn_rshift(BIGNUM *result, BIGNUM *a, int shift) {
+    // Assuming a function init_rshift_for_shift should be there similar to bn_init_for_shift.
+    bn_init_for_shift(result, a, -shift);
+
+    if (shift <= 0) {
+        bn_copy(result, a);
+        return;
+    }
+
+    // Initialize result BIGNUM according to your BIGNUM structure definition
+    // Ensure that result->d has enough space to hold the result
+
+    BN_ULONG carry = 0;
+    int word_shift = shift / BN_ULONG_NUM_BITS;
+    int bit_shift = shift % BN_ULONG_NUM_BITS;
+
+    // Perform the bit shift for each word from the most significant downwards.
+    for (int i = a->top - 1; i >= 0; --i) {
+        BN_ULONG new_carry = a->d[i] << (BN_ULONG_NUM_BITS - bit_shift); // Capture the shifted-in bits
+        result->d[i - word_shift] = (a->d[i] >> bit_shift) | carry; // Shift and add carry
+        carry = new_carry; // Update carry for the next iteration
+    }
+
+    // Note: Negative indexing into result->d array should be handled, i.e., don't attempt to write
+    // to indices less than zero. This also includes updating result->top appropriately.
+
+    // Update top according to the number of shifted-out words
+    result->top = a->top - word_shift;
+    if (bit_shift > 0 && a->top > 0 && result->d[a->top - 1] == 0) {
+        result->top--;
+    }
+
+    // Initialize remaining higher-order words to zero
+    for (int i = result->top; i < MAX_BIGNUM_SIZE; ++i) {
+        result->d[i] = 0;
+    }
+}
+
+__device__ BN_ULONG bn_mul_words(BN_ULONG* result, BN_ULONG* a, BN_ULONG q, int n) {
+    BN_ULONG carry = 0;
+    for (int i = 0; i < n; i++) {
+        // Unsigned long multiplication and addition
+        // Note that we're using a 128-bit type to capture the full product
+        unsigned __int128 full_product = (unsigned __int128)a[i] * (unsigned __int128)q + carry;
+        carry = full_product >> BN_ULONG_NUM_BITS; // extract the higher part as carry
+        result[i] = (BN_ULONG)full_product; // keep the lower part in the result
+    }
+    return carry; // The last carry may need to be added to the subtraction part
+}
+
+__device__ BN_ULONG bn_mul_sub_words(BIGNUM *r, BIGNUM *a, int n, BN_ULONG q) {
+    // Assuming result has enough space
+    BN_ULONG temp[MAX_BIGNUM_SIZE];
+    // Initialize temp array to 0
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) temp[i] = 0;
+    
+    // First, multiply a by q, store in temp
+    BN_ULONG carry = bn_mul_words(temp, a->d, q, a->top);
+
+    // Store the carry if required
+    temp[a->top] = carry;
+
+    // Now shift temp to the left by n words
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= n; i--) {
+        temp[i] = temp[i - n];
+    }
+    for (int i = 0; i < n; i++) {
+        temp[i] = 0; // Fill shifted in words with 0
+    }
+
+    // Finally, subtract temp from r using bn_sub_words and return the borrow
+    return bn_sub_words(r->d, r->d, temp, r->top); // Note: r->top should be adjusted considering the n shift
+}
+
+__device__ void convert_word_to_binary(BN_ULONG word, int bits[]) {
+  for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+    bits[i] = (word >> i) & 1;
+  }
+}
+
+__device__ BN_ULONG convert_binary_to_word(int bits[]) {
+  BN_ULONG word = 0;
+  for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+    word <<= 1;
+    word |= bits[i];
+  }
+  return word;
+}
+
+__device__ int compare_bits(int a_bits[], int b_bits[], int n) {
+  for(int i = n-1; i >= 0; --i) {
+    if (a_bits[i] < b_bits[i]) {
+      return -1;
+    } else if (a_bits[i] > b_bits[i]) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+__device__ void subtract_bits(int a_bits[], int b_bits[], int n) {
+  int borrow = 0;
+  for(int i = 0; i < n; ++i) {
+    a_bits[i] -= b_bits[i] + borrow;
+    if (a_bits[i] < 0) {
+      a_bits[i] += 2;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+  }
+}
+
+__device__ void convert_to_binary_array(BN_ULONG value[], int binary[], int words) {
+    for (int word = words - 1; word >= 0; --word) {
+        for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+            binary[(words - 1 - word) * BN_ULONG_NUM_BITS + i] = (value[word] >> (BN_ULONG_NUM_BITS - 1 - i)) & 1;
+        }
+    }
+}
+
+__device__ void convert_back_to_bn_ulong(int binary[], BN_ULONG value[], int words) {
+    for (int word = 0; word < words; ++word) {
+        value[word] = 0;
+        for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+            value[word] |= ((BN_ULONG)binary[word * BN_ULONG_NUM_BITS + (BN_ULONG_NUM_BITS - 1 - i)] << i);
+        }
+    }
+}
+
+__device__ void convert_back_to_bn_ulong_reversed(int binary[], BN_ULONG value[], int words) {
+    for (int word = 0; word < words; ++word) {
+        value[words - 1 - word] = 0;
+        for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+            value[words - 1 - word] |= ((BN_ULONG)binary[word * BN_ULONG_NUM_BITS + (BN_ULONG_NUM_BITS - 1 - i)] << i);
+        }
+    }
+}
+
+__device__ void binary_print_big_endian(const char* msg, int binary[], int total_bits) {
+    printf("\n%s: \n", msg);
+    for (int i = 0; i < total_bits; i++) {
+        printf("%d", binary[i]);
+        if ((i + 1) % BN_ULONG_NUM_BITS == 0) {
+            printf("\n");
+        }
+    }
+    printf("\n");
+}
+
+__device__ void reverse_chunks(int arr[], int total_bits, int chunk_size) {
+    int num_chunks = total_bits / chunk_size;
+    for (int i = 0; i < num_chunks / 2; ++i) {
+        int start1 = i * chunk_size;
+        int start2 = (num_chunks - i - 1) * chunk_size;
+        // Swap the chunks
+        for (int j = 0; j < chunk_size; ++j) {
+            int temp = arr[start1 + j];
+            arr[start1 + j] = arr[start2 + j];
+            arr[start2 + j] = temp;
+        }
+    }
+}
+
+__device__ void bn_print_quotient(const char* msg, BIGNUM* a) {
+    printf("%s", msg);
+    if (a->top == 0) {
+        printf("0\n");
+        return;
+    }
+    if (a->neg) {
+        printf("-");
+    }
+    int i = a->top - 1;
+    printf("%llx", a->d[i]);
+    for (i = a->top - 2; i >= 0; i--) {
+        printf("%016llx", a->d[i]);
+    }
+    printf("\n");
+}
+
+__device__ int binary_compare(const int *binary1, const int *binary2, int num_bits) {
+    for (int i = num_bits - 1; i >= 0; --i) {
+        if (binary1[i] > binary2[i]) {
+            // binary1 is greater than binary2
+            return 1;
+        } else if (binary1[i] < binary2[i]) {
+            // binary1 is less than binary2
+            return -1;
+        }
+        // If binary1[i] equals binary2[i], continue checking the next bit
+    }
+    // binary1 and binary2 are equal
+    return 0;
+}
+
+// Helper function to determine the 'top' field value for a BIGNUM from a binary array
+__device__ int get_bn_top_from_binary_array(const int binary[], int total_bits) {
+    for (int i = total_bits - 1; i >= 0; --i) {
+        if (binary[i]) {
+            return (i / BN_ULONG_NUM_BITS) + 1;
+        }
+    }
+    return 1; // If every bit is zero, top is one
+}
+
+__device__ int get_bn_top_from_binary_array_little_endian(const int binary[], int total_bits) {
+    int last_non_zero_index = -1; // This will store the last index where binary[i] is non-zero
+    for (int i = 0; i < total_bits; ++i) {
+        if (binary[i]) {
+            last_non_zero_index = i;
+        }
+    }
+    if (last_non_zero_index == -1) {
+        return 1; // If every bit is zero, top is one
+    } else {
+        return (last_non_zero_index / BN_ULONG_NUM_BITS) + 1;
+    }
+}
+
+__device__ void bn_div_binary(
+    int dividend[],
+    int divisor[],
+    int quotient[],
+    int remainder[],
+    int dividend_words,
+    int divisor_words
+) {
+    // Declare variable to store clock() value
+    clock_t start, end;
+    // Start the clock
+    start = clock64();
+
+    const int total_bits = MAX_BIGNUM_SIZE * BN_ULONG_NUM_BITS;
+    int temp[total_bits];
+    memset(temp, 0, sizeof(temp));
+
+    for (int i = 0; i < total_bits; ++i) {
+        // Shift temp left by 1
+        for (int j = 0; j < total_bits - 1; ++j) {
+            temp[j] = temp[j+1];
+        }
+        temp[total_bits - 1] = dividend[i];
+
+        // Check if temp is greater than or equal to divisor
+        int can_subtract = 1;
+        for (int j = 0; j < total_bits; ++j) {
+            if (temp[j] != divisor[j]) {
+                can_subtract = temp[j] > divisor[j];
+                break;
+            }
+        }
+        // Subtract divisor from temp if temp >= divisor
+        if(can_subtract) {
+            quotient[i] = 1;
+            for (int j = total_bits - 1; j >= 0; --j) {
+                temp[j] -= divisor[j];
+                if (temp[j] < 0) {  // Borrow from the next bit if needed
+                    temp[j] += 2;
+                    temp[j-1] -= 1;
+                }
+            }
+        } else {
+            quotient[i] = 0;
+        }
+    }
+
+    // Remainder is in temp after division
+    memcpy(remainder, temp, total_bits * sizeof(int));
+
+    // End the clock
+    end = clock64();
+    // Calculate the elapsed time
+    elapsed_time_bn_div_binary += (double)(end - start);
+}
+
+__device__ void left_shift(BIGNUM *a, int shift) {
+    clock_t start = clock64();
+    if (shift == 0) return;  // No shift needed
+
+    int word_shift = shift / BN_ULONG_NUM_BITS;
+    int bit_shift = shift % BN_ULONG_NUM_BITS;
+
+    // Shift whole words
+    if (word_shift > 0) {
+        for (int i = MAX_BIGNUM_SIZE - 1; i >= word_shift; i--) {
+            a->d[i] = a->d[i - word_shift];
+        }
+        for (int i = 0; i < word_shift; i++) {
+            a->d[i] = 0;
+        }
+    }
+
+    // Shift remaining bits
+    if (bit_shift > 0) {
+        BN_ULONG carry = 0;
+        for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+            BN_ULONG new_carry = a->d[i] >> (BN_ULONG_NUM_BITS - bit_shift);
+            a->d[i] = (a->d[i] << bit_shift) | carry;
+            carry = new_carry;
+        }
+    }
+
+    // Calculate new top
+    unsigned char potential_new_top = a->top + (shift + BN_ULONG_NUM_BITS - 1) / BN_ULONG_NUM_BITS;
+    a->top = find_top_optimized(a, potential_new_top);
+
+    record_function(FN_LEFT_SHIFT, start);
+}
+
+// Function to search for a B value in the cache
+__device__ int find_in_cache(BN_ULONG B, BN_ULONG B_values[], int cache_count) {
+    // init start timer
+    // We may know the place of B in the cache. TODO: Implement a better search algorithm
+    clock_t start = clock64();
+    for (int i = 0; i < cache_count; i++) {
+        if (B_values[i] == B) {
+            record_function(FN_FIND_IN_CACHE, start);
+            return i;
+        }
+    }
+    record_function(FN_FIND_IN_CACHE, start);
+    return -1;
+}
+
+__device__ int bn_div(BIGNUM *bn_quotient, BIGNUM *bn_remainder, BIGNUM *bn_dividend, BIGNUM *bn_divisor)
+{
+    clock_t start = clock64();
+
+    // Store signs and work with absolute values
+    int dividend_neg = bn_dividend->neg;
+    int divisor_neg = bn_divisor->neg;
+    BIGNUM abs_dividend, abs_divisor;
+    init_zero(&abs_dividend);
+    init_zero(&abs_divisor);
+
+    unsigned char divs_max_top = (bn_dividend->top > bn_divisor->top) ? bn_dividend->top : bn_divisor->top;
+
+    // Copy absolute values
+    for (int i = 0; i < divs_max_top; i++) {
+        abs_dividend.d[i] = bn_dividend->d[i];
+        abs_divisor.d[i] = bn_divisor->d[i];
+    }
+    abs_dividend.neg = 0;
+    abs_divisor.neg = 0;
+    abs_dividend.top = bn_dividend->top;
+    abs_divisor.top = bn_divisor->top;
+
+    // Initialize quotient and remainder
+    init_zero(bn_quotient);
+    init_zero(bn_remainder);
+
+    // Handle special cases
+    if (bn_cmp(&abs_dividend, &abs_divisor) == 0) {
+        bn_quotient->d[0] = 1;
+        bn_quotient->top = 1;
+        bn_quotient->neg = (dividend_neg != divisor_neg);
+        printf("abs_dividend == abs_divisor. Quotient = 1\n");
+        record_function(FN_BN_DIV, start);
+        return 1;
+    }
+    // Perform long division
+    BIGNUM current_dividend;
+    init_zero(&current_dividend);
+    char dividend_size = abs_dividend.top;
+
+    #if bn_mul_caching
+        // Initialize cache arrays
+        BN_ULONG B_values[MAX_CACHE_SIZE];
+        BIGNUM products[MAX_CACHE_SIZE];
+        int cache_count = 0;
+    #endif
+
+    for (int i = dividend_size - 1; i >= 0; i--) {
+        // Shift current_dividend left by one word and add next word of dividend
+        left_shift(&current_dividend, 64);
+        current_dividend.d[0] = abs_dividend.d[i];
+
+        // Find quotient digit
+        BN_ULONG q = 0;
+        BN_ULONG left = 0, right = UINT64_MAX;
+        while (left <= right) {
+            BN_ULONG mid = left + (right - left) / 2;
+            BIGNUM temp, product;
+            init_zero(&temp);
+            init_zero(&product);
+            temp.d[0] = mid;
+            temp.top = 1;
+
+            // 
+            #if bn_mul_caching
+                int cache_index = find_in_cache(mid, B_values, cache_count);
+                if (cache_index != -1) {
+                    product = products[cache_index];
+                } else {
+                    bn_mul(&abs_divisor, &temp, &product);
+                    if (cache_count < MAX_CACHE_SIZE) {
+                        B_values[cache_count] = mid;
+                        products[cache_count] = product;
+                        cache_count++;
+                    }
+                    else {
+                        printf("[0] Cache miss. %016llx is more than %d\n", mid, MAX_CACHE_SIZE);
+                    }
+                }
+            #else
+                bn_mul(&abs_divisor, &temp, &product);
+            #endif
+
+            if (bn_cmp(&product, &current_dividend) <= 0) {
+                q = mid;
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        // Add quotient digit to result
+        left_shift(bn_quotient, 64);
+        bn_quotient->d[0] |= q;
+
+        // Subtract q * divisor from current_dividend
+        BIGNUM temp, product;
+        init_zero(&temp);
+        init_zero(&product);
+        temp.d[0] = q;
+        temp.top = 1;
+
+        #if bn_mul_caching
+            int cache_index = find_in_cache(q, B_values, cache_count); // Shell runtime: 362.258584028 seconds
+            if (cache_index != -1) {
+                product = products[cache_index];
+            } else {
+                bn_mul(&abs_divisor, &temp, &product);
+                if (cache_count < MAX_CACHE_SIZE) {
+                    B_values[cache_count] = q;
+                    products[cache_count] = product;
+                    cache_count++;
+                }
+                else {
+                    printf("[1] Cache miss. %016llx is more than %d\n", q, MAX_CACHE_SIZE);
+                }
+            }
+        #else
+            bn_mul(&abs_divisor, &temp, &product);
+        #endif
+
+        bn_subtract(&current_dividend, &current_dividend, &product);
+    }
+
+    // Set remainder
+    // for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+    for (int i = 0; i < current_dividend.top; i++) {
+        bn_remainder->d[i] = current_dividend.d[i];
+    }
+
+    // Apply correct signs
+    bn_quotient->neg = (dividend_neg != divisor_neg);
+    bn_remainder->neg = dividend_neg;
+
+    // Normalize results
+    bn_quotient->top = find_top_optimized(bn_quotient, divs_max_top);
+    bn_remainder->top = find_top_optimized(bn_remainder, divs_max_top);
+
+    record_function(FN_BN_DIV, start);
+    return 1;
+}
+
+__device__ void bn_abs(BIGNUM *result, BIGNUM *a) {
+    // Assuming the BIGNUM structure includes an attribute to indicate the sign (e.g., 'sign')
+    // Copy the number from a to result
+    // In actual code, this would likely need to loop over each digit and copy them.
+    for (int i = 0; i < a->top; ++i) {
+        result->d[i] = a->d[i];
+    }
+    // Ensure result uses the same number of digits as 'a'
+    result->top = a->top;
+
+    // Set the sign of the result to be non-negative (0 for positive in many conventions)
+    result->neg = 0;
+}
+
+__device__ void bn_set_signed_word(BIGNUM *r, int64_t value) {
+    // Clear any existing value in r.
+    // Assuming MAX_BIGNUM_SIZE is defined and represents the maximum size of d[].
+    for (int i = 0; i < MAX_BIGNUM_SIZE; ++i) {
+        r->d[i] = 0;
+    }
+
+    // Set the sign in r. Assuming the sign is represented by a simple integer where
+    // negative numbers have sign = -1 and non-negatives have sign = 0.
+    r->neg = (value < 0) ? -1 : 0;
+
+    // Store the absolute value of the word in the least significant part of r.
+    // Assuming the magnitude can fit in a single 'word' of the BIGNUM data structure.
+    // Depending on how BIGNUM is structured, you might need to handle cases where
+    // the magnitude of the integer does not fit into a single array element.
+    r->d[0] = (value < 0) ? -value : value;
+
+    // Set 'top' to reflect that we're now using the least significant word only.
+    // Assuming 'top' is an index of the highest non-zero element.
+    r->top = (value != 0) ? 1 : 0;
+}
+
+__device__ void bn_swap(BIGNUM *a, BIGNUM *b) {
+    // Swap the dynamic parts
+    BN_ULONG temp_d[MAX_BIGNUM_SIZE];
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+        temp_d[i] = a->d[i];
+    }
+    //a->d = b->d;
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+        a->d[i] = b->d[i];
+    }
+    //b->d = temp_d;
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+        b->d[i] = temp_d[i];
+    }
+    
+    // Swap the scalar components such as top, sign etc.
+    int temp_top = a->top;
+    a->top = b->top;
+    b->top = temp_top;
+
+    int temp_sign = a->neg;
+    a->neg = b-> neg;
+    b->neg = temp_sign;
+}
+
+__device__ int is_even(const BIGNUM* num) {
+    // Considering that the least significant part of the number
+    // is stored at the start of the array.
+    // And assuming that your BIGNUM structure uses an array of integers
+    // to represent the number, named `d` for the data.
+    
+    // Check the least significant bit of the least significant part.
+    // num->d[0] represents the least significant part of the BIGNUM.
+    // If the LSB is 0, it means the number is even.
+    if (num->d[0] & 1) {
+        return 0; // Odd number
+    } else {
+        return 1; // Even number
+    }
+}
+
+__device__ void bn_gcd(BIGNUM* r, BIGNUM* in_a, BIGNUM* in_b) {
+    printf("++ bn_gcd ++\n");
+    bn_print(">> in_a: ", in_a);
+    bn_print(">> in_b: ", in_b);
+    BIGNUM a, b, temp;
+    int shifts = 0;
+
+    // Initialize BIGNUM variables
+    init_zero(&a);
+    init_zero(&b);
+    init_zero(&temp);
+
+    // Copy in_a and in_b to a and b respectively because we need to modify them
+    bn_copy(&a, in_a);
+    bn_copy(&b, in_b);
+
+    // Check if a and b are equal
+    if (bn_cmp(&a, &b) == 0) {
+        bn_copy(r, &a); // Set the result to a (or b, since they are equal)
+        return; // Exit the function early
+    }
+
+    // Check if either a or b is zero at the start and set r accordingly
+    if (bn_is_zero(&a)) {
+        // Since a is zero, GCD(a, b) = b by definition
+        bn_copy(r, &b);
+        return; // Exit the function early
+    }
+    if (bn_is_zero(&b)) {
+        // Since b is zero, GCD(a, b) = a by definition
+        bn_copy(r, &a);
+        return; // Exit the function early
+    }
+
+    // Step 1: remove common factors of 2 from a and b
+    while (is_even(&a) && is_even(&b)) {
+        bn_rshift_one(&a); // equivalent to a /= 2;
+        bn_rshift_one(&b); // equivalent to b /= 2;
+        shifts++;
+    }
+
+    // Make sure a is odd
+    while (is_even(&a)) {
+        bn_rshift_one(&a);
+    }
+
+    do {
+        // Remove factors of 2 from b, as b will eventually become the GCD
+        while (is_even(&b)) {
+            bn_rshift_one(&b);
+        }
+
+        // Swap if necessary to ensure that a <= b
+        if (bn_cmp(&a, &b) > 0) {
+            // Swap a and b
+            bn_swap(&a, &b);
+        }
+
+        bn_subtract(&b, &b, &a); // b = b - a
+    } while (!bn_is_zero(&b));
+
+    // Step 3: adjust the result to include the factors of 2 we removed earlier
+    BIGNUM temp_a;
+    init_zero(&temp_a);
+    bn_lshift_res(&temp_a, &a, shifts); // equivalent to a *= 2^shifts;
+
+    // Copy the result to r
+    bn_copy(r, &temp_a);
+
+    bn_print("<< bn_gcd r: ", r);
+    printf("-- bn_gcd --\n");
+}
+
+__device__ void swap_bignum_pointers(BIGNUM** a, BIGNUM** b) {
+    BIGNUM* temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+__device__ void bn_gcdext(BIGNUM *g, BIGNUM *s, BIGNUM *t, BIGNUM *a, BIGNUM *b) {
+    printf("\n++ bn_gcdext ++\n");
+    printf("\n");
+    BIGNUM old_s, old_t, old_r, r, quotient, temp;
+    init_zero(&old_s);
+    init_zero(&old_t);
+    init_zero(&old_r);
+    init_zero(&r);
+    init_zero(&quotient);
+    init_zero(&temp);
+
+    bn_copy(&old_r, b);
+    bn_copy(&r, a);
+    bn_set_word(&old_s, 0);
+    bn_set_word(s, 1);
+    bn_set_word(&old_t, 1);
+    bn_set_word(t, 0);
+
+    while (!bn_is_zero(&r)) {
+        bn_div(&quotient, &temp, &old_r, &r);
+        bn_copy(&old_r, &r);
+        bn_copy(&r, &temp);
+        bn_mul(&temp, &quotient, s);
+        bn_subtract(&temp, &old_s, &temp);
+        bn_copy(&old_s, s);
+        bn_copy(s, &temp);
+        bn_mul(&temp, &quotient, t);
+        bn_subtract(&temp, &old_t, &temp);
+        bn_copy(&old_t, t);
+        bn_copy(t, &temp);
+    }
+
+    // Use bn_gcd to calculate the GCD
+    bn_gcd(g, a, b);
+    
+    // Adjust the signs of s and t based on the input values
+    if (bn_is_negative(a)) {
+        old_s.neg = !old_s.neg;
+    }
+    if (bn_is_negative(b)) {
+        old_t.neg = !old_t.neg;
+    }
+
+    bn_copy(s, &old_s);
+    bn_copy(t, &old_t);
+
+    bn_print("\n<< g: ", g);
+    bn_print("<< s: ", s);
+    bn_print("<< t: ", t);
+    printf("-- bn_gcdext --\n");
+}
+
+__device__ bool bn_mod_inverse(BIGNUM *result, BIGNUM *a, BIGNUM *n) {
+    clock_t start, end;
+    // Start the clock
+    start = clock64();
+    bool debug = 0;
+    if (bn_is_one(n)) {
+        return false;  // No modular inverse exists
+    }
+
+    BIGNUM r;
+    BIGNUM nr;
+    BIGNUM t;
+    BIGNUM nt;
+    BIGNUM q;
+    BIGNUM tmp;
+    BIGNUM tmp2;
+    BIGNUM tmp3;
+
+    init_zero(&r);
+    init_zero(&nr);
+    init_zero(&t);
+    init_one(&nt);
+    init_zero(&q);
+    init_zero(&tmp);
+    init_zero(&tmp2);
+    init_zero(&tmp3);
+
+    bn_copy(&r, n);
+    bn_mod(&nr, a, n); // Compute non-negative remainder of 'a' modulo 'n'
+    unsigned int counter = 0;
+    while (!bn_is_zero(&nr)) {
+        bn_div(&q, &tmp, &r, &nr); // Compute quotient and remainder
+        bn_copy(&tmp, &nt);
+        bn_mul(&q, &nt, &tmp2); // tmp2 = q * nt
+        init_zero(&tmp3);
+        bn_subtract(&tmp3, &t, &tmp2); // tmp3 = t - tmp2
+        bn_copy(&nt, &tmp3); // dst << src
+        bn_copy(&t, &tmp);
+        bn_copy(&tmp, &nr);
+        bn_mul(&q, &nr, &tmp2);
+        init_zero(&tmp3);
+        bn_subtract(&tmp3, &r, &tmp2); // tmp3 = r - tmp2
+        bn_copy(&nr, &tmp3);
+        bn_copy(&r, &tmp);
+        if (debug) counter++;
+    }
+
+    if (!bn_is_one(&r)) {
+        init_zero(result);
+        delete &r;
+        delete &nr;
+        delete &t;
+        delete &nt;
+        delete &q;
+        delete &tmp;
+        delete &tmp2;
+        return false; // No modular inverse exists
+    }
+
+    if (bn_is_negative(&t)) {
+        bn_add(&tmp2, &t, n); // tmp2 = t + n
+        bn_copy(&t, &tmp2);
+    }
+
+    bn_copy(result, &t);
+
+    delete &r;
+    delete &nr;
+    delete &t;
+    delete &nt;
+    delete &q;
+    delete &tmp;
+    delete &tmp2;
+    // Stop the clock
+    end = clock64();
+    elapsed_time_bn_mod_inverse += (double)(end - start);
+    return true;
+}
+
+__device__ void bn_to_hex_str(BIGNUM *bn, char *str) {
+    int i, j, v;
+    char hex_chars[] = "0123456789ABCDEF";
+    j = 0;
+
+    for (i = bn->top - 1; i >= 0; i--) {
+        for (int shift = BN_ULONG_NUM_BITS - 4; shift >= 0; shift -= 4) {
+            v = (bn->d[i] >> shift) & 0xf;
+            if (v || j > 0 || i == 0) {
+                str[j++] = hex_chars[v];
+            }
+        }
+    }
+    str[j] = '\0';
+}
+
+__device__ size_t dev_strlen(const char *str) {
+    size_t len = 0;
+    while (str[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+__device__ void bignum_to_bit_array(BIGNUM *n, unsigned int *bits) {
+    int index = 0;
+    
+    // Iterate through the words in reverse order
+    for (int i = 0; i < n->top; ++i) {
+        BN_ULONG word = n->d[i];
+        // For each word, iterate through bits from most significant to least significant
+        for (int j = 0; j < BN_ULONG_NUM_BITS; ++j) {
+            bits[index++] = (word >> j) & 1;
+        }
+    }
+
+    // If n->top < 4, fill the remaining bits with zeros
+    while (index < 256) {
+        bits[index++] = 0;
+    }
+}
+
+__device__ void reverse_order(BIGNUM *test_values_a, const unsigned char words_count) {
+    for (size_t j = 0; j < words_count / 2; j++) {
+        BN_ULONG temp_a = test_values_a->d[j];
+        test_values_a->d[j] = test_values_a->d[words_count - 1 - j];
+        test_values_a->d[words_count - 1 - j] = temp_a;
+    }
+}
+
+__device__ void bufferToHex(const uint8_t *buffer, char *output) {
+    // Init output
+    for (size_t i = 0; i < PUBLIC_KEY_SIZE * 2 + 1; i++) {
+        output[i] = '\0';
+        if (i > 66) {
+            printf("Error: bufferToHex output buffer overflow\n");
+        }
+    }
+    const char hex_chars[] = "0123456789abcdef";
+    for (size_t i = 0; i < PUBLIC_KEY_SIZE; i++) {
+        output[i * 2] = hex_chars[buffer[i] >> 4];
+        output[i * 2 + 1] = hex_chars[buffer[i] & 0xF];
+    }
+    output[PUBLIC_KEY_SIZE * 2] = '\0';
+}
+```
+
+# bip32.h
+```
+// BIP32 ++
+typedef struct {
+    unsigned char master_private_key[32];
+    unsigned char chain_code[32];
+    // unsigned char public_key[33];
+} BIP32Info;
+
+__device__ void my_cuda_memcpy_unsigned_char_b(uint8_t *dst, const uint8_t *src, unsigned int n) {
+    for (unsigned int i = 0; i < n; ++i) {
+        dst[i] = src[i];
+    }
+}
+
+__device__ BIP32Info bip32_from_seed_kernel(const uint8_t *seed, uint32_t seed_len) {
+    // printf("++ bip32_from_seed_kernel ++\n");
+    // printf(">> seed: ");
+    // print_as_hex(seed, seed_len);
+    // printf(">> seed_len: %d\n", seed_len);
+
+    BIP32Info info;
+	// Initialize HMAC_SHA512_CTX
+    HMAC_SHA512_CTX hmac;
+    
+    // Compute HMAC-SHA512 with "Bitcoin seed" as the key
+    hmac_sha512_init(&hmac, (const uint8_t *)"Bitcoin seed", 12);
+    hmac_sha512_update(&hmac, seed, seed_len);
+
+    // Print hmac
+    // printf("# hmac: ");
+    
+    unsigned char hash[64];
+    // clear hash
+    for (int i = 0; i < 64; ++i) {
+        hash[i] = 0;
+    }
+    hmac_sha512_final(&hmac, hash);
+
+    // // Print hash
+    // printf("# hash: ");
+    // print_as_hex(hash, 64);
+    
+    // Copy the first 32 bytes to master_private_key and the next 32 bytes to chain_code
+    //my_cuda_memcpy_unsigned_char(info->master_private_key, hash, 32);
+    //my_cuda_memcpy_unsigned_char(info->chain_code, hash + 32, 32);
+	my_cuda_memcpy_unsigned_char_b(info.master_private_key, hash, 32);
+	my_cuda_memcpy_unsigned_char_b(info.chain_code, hash + 32, 32);
+
+    // printf("-- bip32_from_seed_kernel --\n");
+	return info;
+}
+// BIP32 --
+```
+
+# point.h
+```
+struct EC_POINT {
+  BIGNUM x; 
+  BIGNUM y;
+};
+
+// In the current structure, we might use a specific value (e.g., 0 or -1) 
+// to represent the components of the point at infinity.
+// A version that uses 0 to signify the point at infinity could be:
+__device__ int point_is_at_infinity(EC_POINT *P) {    
+    if (bn_is_zero(&P->x) || bn_is_zero(&P->y)) {
+        return 1; // P is the point at infinity
+    }
+    return 0; // P is not the point at infinity
+}
+
+__device__ void point_double(EC_POINT *P, EC_POINT *R, BIGNUM *p) {
+    // Temporary storage for the calculations
+    BIGNUM s, xR, yR, m;
+    debug_printf("point_double 0\n");
+    if (point_is_at_infinity(P)) {
+        debug_printf("point_double 1\n");
+        // Point doubling at infinity remains at infinity
+        set_bn(&R->x, &P->x);  // Copying P->x to R->x, assuming these are in the proper zeroed state
+        set_bn(&R->y, &P->y);  // Copying P->y to R->y
+        debug_printf("# 2\n");
+        return;
+    }
+    debug_printf("point_double 3\n");
+
+    // Calculate m = 3x^2 + a (a is zero for secp256k1)
+    mod_mul(&P->x, &P->x, p, &m);  // m = x^2 mod p
+    debug_printf("point_double 4\n");
+    set_bn(&s, &m);                 // s = x^2 (Since we use a=0 in secp256k1, skip adding 'a')
+    bn_add(&m, &m, &s);             // s = 2x^2
+    bn_add(&s, &m, &s);             // s = 3x^2
+    
+    // Calculate s = (3x^2 + a) / (2y) = (s) / (2y)
+    // First, compute the modular inverse of (2y)
+    BIGNUM two_y;
+    debug_printf("point_double 5\n");
+    set_bn(&two_y, &P->y);         // Assuming set_bn simply duplicates P->y
+    debug_printf("point_double 6\n");
+    bn_add(&two_y, &two_y, &two_y); // two_y = 2y
+    BIGNUM inv_two_y;
+    debug_printf("point_double 7\n");
+    mod_inv(&two_y, p, &inv_two_y);  // Compute the inverse of 2y
+    debug_printf("point_double 8\n");
+
+    mod_mul(&s, &inv_two_y, p, &s);  // Finally, s = (3x^2 + a) / (2y) mod p
+    
+    // Compute xR = s^2 - 2x mod p
+    mod_mul(&s, &s, p, &xR);        // xR = s^2 mod p    
+    set_bn(&m, &P->x);              // m = x
+    
+    bn_add(&m, &m, &m);             // m = 2x
+    bn_subtract(&xR, &m, &xR);           // xR = s^2 - 2x
+    bn_mod(&xR, p, &xR);            // Modulo operation
+
+    // Compute yR = s * (x - xR) - y mod p
+    bn_subtract(&P->x, &xR, &yR);        // yR = x - xR
+    mod_mul(&s, &yR, p, &yR);       // yR = s * (x - xR)
+    bn_subtract(&yR, &P->y, &yR);        // yR = s * (x - xR) - y
+    bn_mod(&yR, p, &yR);            // Modulo operation
+
+    // Copy results to R only after all calculations are complete to allow in-place doubling (P == R)
+    set_bn(&R->x, &xR);
+    set_bn(&R->y, &yR);
+}
+
+__device__ void copy_point(EC_POINT *dest, EC_POINT *src) {
+    // Assuming EC_POINT contains BIGNUM structures for x and y,
+    // and that BIGNUM is a structure that contains an array of BN_ULONG for the digits,
+    // along with other metadata (like size, top, neg, etc.)
+
+    // init the dest point
+    init_zero(&dest->x);
+    init_zero(&dest->y);
+
+    // Copy the BIGNUM x
+    bn_copy(&dest->x, &src->x);
+
+    // Copy the BIGNUM y
+    bn_copy(&dest->y, &src->y);
+}
+
+__device__ void set_point_at_infinity(EC_POINT *point) {
+    // Assuming EC_POINT is a structure containing BIGNUM x and y
+    // and that a BIGNUM value of NULL or {0} represents the point at infinity
+
+    // To set the point at infinity, one straightforward way is to assign
+    // a null pointer to x and y if the BIGNUM structure allows it, or 
+    // set their values to some predetermined sentinel value that indicates
+    // the point at infinity.
+
+    // If using the sentinel value approach - ensure BIGNUM is set in a way
+    // that other functions can check for it and treat it as infinity
+
+    // To set the point to 0 (as an example sentinel value), do:
+    init_zero(&point->x);
+    init_zero(&point->y);// Ensure that this logic matches how you identify point at infinity elsewhere
+}
+
+// TODO: Reuse temp variables as much as possible to reduce registers usage
+__device__ int point_add(
+    EC_POINT *result, 
+    EC_POINT *p1, 
+    EC_POINT *p2, 
+    BIGNUM *p, 
+    BIGNUM *a
+) {
+    bool debug = 0;
+    if (debug) {
+        printf("++ point_add ++\n");    
+        bn_print(">> p1.x: ", &p1->x);
+        bn_print(">> p1.y: ", &p1->y);
+        bn_print(">> p2.x: ", &p2->x);
+        bn_print(">> p2.y: ", &p2->y);
+        bn_print(">> p: ", p);
+        printf(">> p.top: %d\n", p->top);
+        printf(">> p.neg: %d\n", p->neg);
+        bn_print(">> a: ", a);
+        printf(">> a.top: %d\n", a->top);
+        printf(">> a.neg: %d\n", a->neg);
+    }
+
+    // Handle the point at infinity cases
+    if (point_is_at_infinity(p1)) {
+        copy_point(result, p2);
+        if (debug) printf("p1 point at infinity\n");
+        return 0;
+    }
+
+    if (point_is_at_infinity(p2)) {
+        copy_point(result, p1);
+        if (debug) printf("p2 point at infinity\n");
+        return 0;
+    }
+
+    
+
+    // Initialize temporary BIGNUMs for calculation
+    BIGNUM s, x3, y3, tmp1, tmp2, tmp3, two, tmp1_squared;
+    init_zero(&s);
+    init_zero(&x3);
+    init_zero(&y3);
+    init_zero(&tmp1);
+    init_zero(&tmp2);
+    init_zero(&tmp3);
+    init_zero(&two);
+    init_zero(&tmp1_squared);
+
+    // Case 1: p1 = p2 && p1.y != p2.y
+    if (bn_cmp(&p1->x, &p2->x) == 0 && bn_cmp(&p1->y, &p2->y) != 0) {
+        // The points are inverses to one another, return point at infinity
+        if (debug) printf("The points are inverses to one another\n");
+        set_point_at_infinity(result);
+        return 0;
+    }
+
+    
+
+    // Case 3: p1 == p2
+    if (bn_cmp(&p1->x, &p2->x) == 0) {
+        // Point doubling
+        init_zero(&two);
+        bn_set_word(&two, 2);
+
+        // BIGNUM tmp1_squared;
+        init_zero(&tmp1_squared);
+        init_zero(&tmp1);
+        bn_copy(&tmp1, &p1->x); // dst << src
+        if (debug) {
+            bn_print("\n[0] >> bn_mul p1.x: ", &p1->x);
+            bn_print("[0] >> bn_mul tmp1: ", &tmp1);
+        }
+        bn_mul(&p1->x, &tmp1, &tmp1_squared);     // tmp1_squared = p1.x^2 // a * b = product
+        if (debug) {
+            bn_print("[0] << bn_mul tmp1: ", &tmp1_squared);
+        }
+
+        init_zero(&tmp1);
+        bn_copy(&tmp1, &tmp1_squared); // dst << src
+        // Init tmp2 as 3
+        init_zero(&tmp2);
+        bn_set_word(&tmp2, 3);
+        bn_mul(&tmp1, &tmp2, &tmp1_squared);     // a * b = product
+        if (debug) bn_print("\n[1] << bn_mul tmp1_squared: ", &tmp1_squared); // OK
+
+        if (debug) bn_print("\n[2] << bn_add tmp1_squared: ", &tmp1_squared); // 
+
+        init_zero(&tmp1);
+        if (debug) bn_print("\n# [3] >> bn_mod tmp1_squared: ", &tmp1_squared);
+        bn_copy(&tmp1, &tmp1_squared); // dst << src        
+        if (debug) bn_print("# [3] >> bn_mod tmp1: ", &tmp1);
+        init_zero(&tmp1_squared);
+        if (debug) bn_print("[3] >> bn_mod tmp1_squared: ", &tmp1_squared);
+        if (debug) bn_print("[3] >> bn_mod tmp1: ", &tmp1);
+        if (debug) bn_print("[3] >> bn_mod p: ", p);
+        bn_mod(&tmp1_squared, &tmp1, p);           // tmp1_squared = tmp1 mod p
+        if (debug) bn_print("[3] << bn_mod tmp1_squared: ", &tmp1_squared); // OK
+        if (debug) bn_print("[3] << bn_mod tmp1: ", &tmp1);
+        
+        init_zero(&tmp2);
+        bn_set_word(&two, 2);
+        bn_mul(&p1->y, &two, &tmp2);  // tmp2 = 2 * p1.y
+        if (debug) bn_print("\n[4] << bn_mul tmp2: ", &tmp2); // OK
+
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &tmp2); // dst << src
+        bn_mod(&tmp2, &tmp3, p);           // tmp2 = tmp3 mod p
+        if (debug) bn_print("\n[5] << bn_mod tmp2: ", &tmp2); // OK
+        
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &tmp2); // dst << src
+        init_zero(&tmp2);
+        if (debug) bn_print("\n[6] >> bn_mod_inverse tmp2: ", &tmp2);
+        if (debug) bn_print("[6] >> bn_mod_inverse tmp3: ", &tmp3);
+        if (debug) bn_print("[6] >> bn_mod_inverse p: ", p);
+        bn_mod_inverse(&tmp2, &tmp3, p);  // tmp2 = tmp3 mod p
+        if (debug) bn_print("[6] << bn_mod_inverse tmp2: ", &tmp2); // 
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &tmp1_squared); // dst << src
+        if (debug) bn_print("\n[7] >> bn_mul tmp3: ", &tmp3);
+        if (debug) bn_print("[7] >> bn_mul tmp2: ", &tmp2);
+        bn_mul(&tmp3, &tmp2, &s);  // tmp1 * tmp2 = s
+        if (debug) bn_print("[7] << bn_mul s: ", &s); //
+
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &s); // dst << src
+        bn_mod(&s, &tmp3, p);  // s = s mod p
+        if (debug) bn_print("\n[8] << bn_mod s: ", &s); //
+
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &s); // dst << src
+        bn_mul(&tmp3, &tmp3, &x3);  // x3 = s^2
+        bn_subtract(&x3, &x3, &p1->x);  // x3 = x3 - p1.x
+        bn_subtract(&x3, &x3, &p1->x);  // x3 = x3 - p1.x
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &x3); // dst << src
+        bn_mod(&x3, &tmp3, p);  // x3 = x3 mod p
+        init_zero(&tmp1);
+        bn_subtract(&tmp1, &p1->x, &x3);  // tmp1 = p1.x - x3
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &s); // dst << src
+        bn_mul(&tmp3, &tmp1, &y3);  // y3 = s * tmp1
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &y3); // dst << src
+        bn_subtract(&y3, &tmp3, &p1->y);  // y3 = y3 - p1.y
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &y3); // dst << src
+        bn_mod(&y3, &tmp3, p);  // y3 = y3 mod p
+    } else {
+        // Case 2: p1 != p2
+        // Regular point addition
+        bn_subtract(&tmp1, &p2->y, &p1->y);
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &tmp1); // dst << src
+        init_zero(&tmp1);
+        bn_mod(&tmp1, &tmp3, p);           // tmp1 = (p2.y - p1.y) mod p 
+        init_zero(&tmp2);
+        bn_subtract(&tmp2, &p2->x, &p1->x);
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &tmp2);
+        bn_mod(&tmp2, &tmp3, p);           // tmp2 = (p2.x - p1.x) mod p
+        init_zero(&tmp3);
+        bn_copy(&tmp3, &tmp2);
+        init_zero(&tmp2);
+        bn_mod_inverse(&tmp2, &tmp3, p);
+        init_zero(&s);
+        bn_mul(&tmp1, &tmp2, &s);
+        init_zero(&tmp2);
+        bn_copy(&tmp2, &s);
+        init_zero(&s);
+        bn_mod(&s, &tmp2, p);                 // s = (p2.y - p1.y) / (p2.x - p1.x) mod p
+        init_zero(&tmp2);
+        bn_copy(&tmp2, &s);
+        bn_mul(&s, &tmp2, &x3); // a * b = product // x3 = s^2
+        init_zero(&tmp2);
+        bn_copy(&tmp2, &x3);
+        bn_subtract(&x3, &tmp2, &p1->x); // result = a - b
+        bn_subtract(&x3, &x3, &p2->x);          // x3 = s^2 - p1.x - p2.x
+        init_zero(&tmp2);
+        bn_copy(&tmp2, &x3);
+        bn_mod(&x3, &tmp2, p); // x3 = tmp2 mod p
+        bn_subtract(&tmp1, &p1->x, &x3);
+        bn_mul(&s, &tmp1, &y3); // a * b = product
+        init_zero(&tmp2);
+        bn_copy(&tmp2, &y3);
+        bn_subtract(&y3, &tmp2, &p1->y);          // y3 = s * (p1.x - x3) - p1.y
+        init_zero(&tmp2);
+        bn_copy(&tmp2, &y3);
+        bn_mod(&y3, &tmp2, p);               // y3 = tmp2 mod p
+    }
+
+    // Assign the computed coordinates to the result
+    bn_copy(&result->x, &x3);
+    bn_copy(&result->y, &y3);
+
+    // Free the dynamically allocated memory
+    free_bignum(&s);
+    free_bignum(&x3);
+    free_bignum(&y3);
+    free_bignum(&tmp1);
+    free_bignum(&tmp2);
+    free_bignum(&tmp3);
+    free_bignum(&two);
+    free_bignum(&tmp1_squared);
+
+    return 0;
+}
+
+__device__ void init_point_at_infinity(EC_POINT *P) {
+    // For the x and y coordinates of P, we'll set the 'top' to 0,
+    // which is our chosen convention for representing the point at infinity.
+
+    init_zero(&P->x);
+    init_zero(&P->y);
+
+    P->x.top = 1; // No valid 'words' in the BIGNUM representing x
+    P->y.top = 1; // No valid 'words' in the BIGNUM representing y
+    
+    // If 'd' arrays have been allocated, set them to zero as well.
+    // memset could potentially be used for this if available and if 'd' is allocated.
+    // Alternatively, if you use flags or other conventions for points at infinity,
+    // set them accordingly here.
+}
+
+__device__ EC_POINT ec_point_scalar_mul(
+    EC_POINT *point, 
+    BIGNUM *scalar, 
+    BIGNUM *curve_prime, 
+    BIGNUM *curve_a
+    ) {
+    debug_printf("++ ec_point_scalar_mul ++\n");
+    bn_print(">> point x: ", &point->x);
+    bn_print(">> point y: ", &point->y);
+    bn_print(">> scalar: ", scalar);
+    bn_print(">> curve_prime: ", curve_prime);
+    bn_print(">> curve_a: ", curve_a);
+    
+    EC_POINT current = *point; // This initializes the current point with the input point
+    EC_POINT result; // Initialize the result variable, which accumulates the result
+    EC_POINT tmp_result;
+    EC_POINT tmp_a;
+    EC_POINT tmp_b;                                     
+    
+    init_point_at_infinity(&result);                 // Initialize it to the point at infinity
+    init_point_at_infinity(&tmp_result);                 // Initialize it to the point at infinity
+    init_point_at_infinity(&tmp_a);                 // Initialize it to the point at infinity
+    init_point_at_infinity(&tmp_b);                 // Initialize it to the point at infinity
+    
+    // Convert scalar BIGNUM to an array of integers that's easy to iterate bit-wise
+    unsigned int bits[256];                          // Assuming a 256-bit scalar
+    bignum_to_bit_array(scalar, bits);    
+    for (int i = 0; i < 256; i++) {                 // Assuming 256-bit scalars        
+
+        if (bits[i]) {// If the i-th bit is set
+            init_point_at_infinity(&tmp_result);
+            point_add(&tmp_result, &result, &current, curve_prime, curve_a);  // Add current to the result
+
+            init_point_at_infinity(&result); // Reset result
+            bn_copy(&result.x, &tmp_result.x);
+            bn_copy(&result.y, &tmp_result.y);            
+        }
+        // init tmp_result
+        init_point_at_infinity(&tmp_result);
+        // init tmp_a
+        init_point_at_infinity(&tmp_a);
+        // init tmp_b
+        init_point_at_infinity(&tmp_b);
+        // Copy current to tmp_a
+        bn_copy(&tmp_a.x, &current.x);
+        bn_copy(&tmp_a.y, &current.y);
+        // Copy current to tmp_b
+        bn_copy(&tmp_b.x, &current.x);
+        bn_copy(&tmp_b.y, &current.y);
+        point_add(&tmp_result, &tmp_a, &tmp_b, curve_prime, curve_a);  // Double current by adding to itself
+        // Copy tmp_result to current
+        bn_copy(&current.x, &tmp_result.x);
+        bn_copy(&current.y, &tmp_result.y);
+    }    
+    // Copy current to result
+    bn_print("3 result.x: ", &result.x);
+    bn_print("3 result.y: ", &result.y);
+    return result;
+}
+```
+
+# child_key.h
+```
+// Child key derivation ++
+__device__ void my_cuda_memcpy_uint32_t(uint32_t *dst, const uint32_t *src, unsigned int n) {
+    for (unsigned int i = 0; i < n / sizeof(uint32_t); ++i) {
+        uint32_t val = src[i];
+        dst[i] = __byte_perm(val, 0, 0x0123);
+    }
+}
+
+__device__ void my_cuda_memcpy_uint32_t_to_unsigned_char(unsigned char *dst, const uint32_t *src, unsigned int n) {
+    for (unsigned int i = 0; i < n / sizeof(uint32_t); ++i) {
+        uint32_t val = src[i];
+        dst[4 * i] = (val) & 0xFF;
+        dst[4 * i + 1] = (val >> 8) & 0xFF;
+        dst[4 * i + 2] = (val >> 16) & 0xFF;
+        dst[4 * i + 3] = (val >> 24) & 0xFF;
+    }
+}
+
+__device__ BIP32Info GetChildKeyDerivation(uint8_t* key, uint8_t* chainCode, uint32_t index) {
+	// printf("++ GetChildKeyDerivation ++\n");
+    // printf(">> key: ");
+    // print_as_hex(key, 32);
+    // printf(">> chainCode: ");
+    // print_as_hex(chainCode, 32);
+    // printf(">> index: %u\n", index);
+    // printf("\n* step 0 index: %u\n", index);
+    BIP32Info info;
+
+    // Compute HMAC-SHA512
+    HMAC_SHA512_CTX hmac;
+    uint8_t buffer[100];
+    uint8_t hash[64];
+    // unsigned int len = 64;
+
+    // Fill buffer according to index
+    if (index == 0) {
+		// printf("    * INDEX is 0\n");
+        GetPublicKey(buffer, key);
+
+    } else {
+        buffer[0] = 0;
+        my_cuda_memcpy_unsigned_char(buffer + 1, key, 32);
+    }
+
+    // Append index in big-endian format to buffer
+    buffer[33] = (index >> 24) & 0xFF;
+    buffer[34] = (index >> 16) & 0xFF;
+    buffer[35] = (index >> 8) & 0xFF;
+    buffer[36] = index & 0xFF;
+
+	hmac_sha512_init(&hmac, chainCode, 32);
+    hmac_sha512_update(&hmac, buffer, 37);  // Assuming buffer_len = 37 // TODO: Check would it be defined in "int len"? 64
+    hmac_sha512_final(&hmac, hash);
+
+	// Print the pre-HMAC values
+    // printf("      * Cuda Pre-HMAC variable key:");
+    // for (int i = 0; i < 32; i++) {
+    //     printf("%02x", key[i]);
+    // }
+    // printf("\n");
+
+    // printf("      * Cuda Pre-HMAC Buffer:");
+    // for (int i = 0; i < 37; i++) { // Assuming the buffer length up to the index is 37
+    //     printf("%02x", buffer[i]);
+    // }
+    // printf("\n");
+
+    // printf("      * Cuda Pre-HMAC Key:");
+    // for (int i = 0; i < 32; i++) {
+    //     printf("%02x", chainCode[i]);
+    // }
+    // printf("\n");   
+
+	uint32_t il[8], ir[8];
+	
+	// Populate il and ir from hash
+	my_cuda_memcpy_uint32_t(il, (uint32_t*)hash, 8 * sizeof(uint32_t)); // Using uint32_t version for il
+	my_cuda_memcpy_uint32_t(ir, (uint32_t*)(hash + 32), 8 * sizeof(uint32_t)); // Using uint32_t version for ir
+
+    // // Print the hash from 32 to 64
+    // printf("      * Cuda hash from 32 to 64:");
+    // for (int i = 32; i < 64; i++) {
+    //     printf("%02x", hash[i]);
+    // }
+    // printf("\n");
+
+    // Copy the hash (from 32 to 64) to chain_code
+    my_cuda_memcpy_unsigned_char(info.chain_code, hash + 32, 32);
+
+	// // After HMAC-SHA512
+	// printf("      * Cuda Post-HMAC hash:");
+	// for (int i = 0; i < 64; i++) {
+	// 	printf("%02x", hash[i]);
+	// }
+	// printf("\n");
+
+	// printf("      * Cuda il as uint32_t: ");
+	// for (int i = 0; i < 8; ++i) {
+	// 	printf("%08x", il[i]);
+	// }
+	// printf("\n");
+
+	// printf("      * Cuda ir as uint32_t: ");
+	// for (int i = 0; i < 8; ++i) {
+	// 	printf("%08x", ir[i]);
+	// }
+	// printf("\n");
+
+    // printf("      * Cuda ir as uint64_t: ");
+    uint64_t ir_64[4];
+    for (int i = 0; i < 8; ++i) {
+        ir_64[i] = ((uint64_t)ir[2*i] << 32) | (uint64_t)ir[2*i + 1];
+    }
+    // for (int i = 0; i < 4; ++i) {
+    //     printf("%016lx", ir_64[i]);
+    // }
+    // printf("\n");
+
+	// Perform the copy
+    // Copy ir_64 to chain_code
+    for (int i = 0; i < 4; i++) {
+        info.chain_code[8*i] = (ir_64[i] >> 56) & 0xFF;
+        info.chain_code[8*i + 1] = (ir_64[i] >> 48) & 0xFF;
+        info.chain_code[8*i + 2] = (ir_64[i] >> 40) & 0xFF;
+        info.chain_code[8*i + 3] = (ir_64[i] >> 32) & 0xFF;
+        info.chain_code[8*i + 4] = (ir_64[i] >> 24) & 0xFF;
+        info.chain_code[8*i + 5] = (ir_64[i] >> 16) & 0xFF;
+        info.chain_code[8*i + 6] = (ir_64[i] >> 8) & 0xFF;
+        info.chain_code[8*i + 7] = ir_64[i] & 0xFF;
+    }
+
+	// // Print individual bytes of chain_code after copying
+	// printf("      * Individual bytes of Cuda chain_code after copying: ");
+	// for (int i = 0; i < 32; ++i) {
+	// 	printf("%02x", info.chain_code[i]);
+	// }
+	// printf("\n");
+
+	// // After populating il and ir
+	// printf("    * il: ");
+	// for (int i = 0; i < 8; i++) {
+	// 	printf("%08x", il[i]);
+	// }
+	// printf("\n");
+	// printf("    * ir: ");
+	// for (int i = 0; i < 8; i++) {
+	// 	printf("%08x", ir[i]);
+	// }
+	// printf("\n");    
+	
+	// Addition
+	BIGNUM a;
+	BIGNUM b;
+	BIGNUM curveOrder;
+	BIGNUM newKey;
+	BIGNUM publicKey;
+
+    init_zero(&a);
+    init_zero(&b);
+    init_zero(&curveOrder);
+    init_zero(&newKey);
+    init_zero(&publicKey);
+
+	// BN_ULONG a_d[8];
+  	// BN_ULONG b_d[8];
+	BN_ULONG newKey_d[8];
+  	// BN_ULONG curveOrder_d[16];
+	// BN_ULONG publicKey_d[8];
+	// uint32_t curveOrder[8] = {0xffffffff, 0xffffffff, 0xffffffff, 0xfffffffe, 0xbaaedce6, 0xaf48a03b, 0xbfd25e8c, 0xd0364141};
+	// Initialize curveOrder_d for secp256k1
+	// FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    // 
+    curveOrder.d[0] = 0xBFD25E8CD0364141;
+    curveOrder.d[1] = 0xBAAEDCE6AF48A03B;
+    curveOrder.d[2] = 0xFFFFFFFFFFFFFFFE;
+    curveOrder.d[3] = 0xFFFFFFFFFFFFFFFF;
+    curveOrder.neg = 0;
+    curveOrder.top = 4;
+    
+    // hash: uint8_t[64]
+    // il: uint32_t il[8]
+    // a.d: is BN_ULONG
+    // Initialize a from il
+    for (int i = 0; i < 4; ++i) {
+        a.d[3 - i] = ((BN_ULONG)il[2*i] << 32) | (BN_ULONG)il[2*i + 1];
+    }
+    a.neg = 0;
+    a.top = 4;  // We're using 4 64-bit words
+    // bn_print("A: ", &a);
+
+	// key: uint8_t*
+    // b.d: BN_ULONG
+    // Initialize b from key
+	for (int i = 0; i < 4; ++i) {
+        b.d[3 - i] = ((BN_ULONG)key[8*i] << 56) | 
+                     ((BN_ULONG)key[8*i + 1] << 48) | 
+                     ((BN_ULONG)key[8*i + 2] << 40) | 
+                     ((BN_ULONG)key[8*i + 3] << 32) |
+                     ((BN_ULONG)key[8*i + 4] << 24) | 
+                     ((BN_ULONG)key[8*i + 5] << 16) | 
+                     ((BN_ULONG)key[8*i + 6] << 8) | 
+                     ((BN_ULONG)key[8*i + 7]);
+    }
+    b.neg = 0;
+    b.top = 4;  // We're using 4 64-bit words
+    // bn_print("B: ", &b);
+
+    // return info;
+
+	// Initialize newKey_d
+	for (int i = 0; i < 8; i++) newKey_d[i] = 0;
+	// newKey.d = newKey_d;
+    for (int j = 0; j < 8; ++j) {
+        newKey.d[j] = newKey_d[j]; // TODO: Check do we need to reverse the order
+    }
+	newKey.neg = 0;
+	// newKey.top = 8;
+    newKey.top = find_top(&newKey);
+    // bn_print("Debug Cuda newKey (Before add): ", &newKey);
+	
+    bn_add(&newKey, &a, &b);
+
+    // // Print A + B
+    // bn_print("Debug Cuda newKey (After add): ", &newKey);
+
+    // // Print curve order
+    // bn_print("Debug Cuda curveOrder: ", &curveOrder);
+
+    // printf("Calling bn_mod\n");
+    bn_mod(&newKey, &newKey, &curveOrder);
+
+    // printf("After bn_mod\n");
+    // bn_print("Debug Cuda newKey (After mod): ", &newKey);
+
+    // Copy newKey to info.master_private_key
+    for (int i = 0; i < 4; i++) {
+        info.master_private_key[8*i] = (newKey.d[3 - i] >> 56) & 0xFF;
+        info.master_private_key[8*i + 1] = (newKey.d[3 - i] >> 48) & 0xFF;
+        info.master_private_key[8*i + 2] = (newKey.d[3 - i] >> 40) & 0xFF;
+        info.master_private_key[8*i + 3] = (newKey.d[3 - i] >> 32) & 0xFF;
+        info.master_private_key[8*i + 4] = (newKey.d[3 - i] >> 24) & 0xFF;
+        info.master_private_key[8*i + 5] = (newKey.d[3 - i] >> 16) & 0xFF;
+        info.master_private_key[8*i + 6] = (newKey.d[3 - i] >> 8) & 0xFF;
+        info.master_private_key[8*i + 7] = newKey.d[3 - i] & 0xFF;
+    }
+	
+    // printf("\n");
+    return info;
+}
+
+```
+
+# bech32.h
+```
+// #include <stdio.h>
+// #include <string.h>
+// #include <stdlib.h>
+// #include <stdint.h>
+// #include "bignum.h"
+
+#define RIPEMD160_DIGEST_LENGTH 20
+#define CHECKSUM_LENGTH 6
+#define CHARSET "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+#define MAX_RESULT_LEN 90
+#define MAX_HRP_LEN 20
+#define MAX_VALUES_LEN (MAX_HRP_LEN * 2 + 1 + RIPEMD160_DIGEST_LENGTH + CHECKSUM_LENGTH)
+__constant__ uint32_t poly_mod_generator[] = {0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
+
+__device__ void ConvertBytesTo5BitGroups(uint8_t *data, size_t len, uint8_t *result, size_t *result_len) {
+    uint32_t buffer = 0;
+    uint8_t bufferLength = 0;
+    *result_len = 0;
+
+    for(size_t i = 0; i < len; i++) {
+        uint8_t b = data[i];
+        buffer = (buffer << 8) | b;
+        bufferLength += 8;
+
+        while(bufferLength >= 5) {
+            result[*result_len] = (buffer >> (bufferLength - 5)) & 0x1F;
+            (*result_len)++;
+            bufferLength -= 5;
+        }
+    }
+
+    if(bufferLength > 0) {
+        result[*result_len] = (buffer << (5 - bufferLength)) & 0x1F;
+        (*result_len)++;
+    }
+}
+
+__device__ void ExpandHrp(const char *hrp, uint8_t *ret) {
+    size_t hrp_len = bn_strlen(hrp);
+    for (size_t i = 0; i < hrp_len; ++i) {
+        uint8_t c = hrp[i];
+        ret[i] = c >> 5;
+        ret[i + hrp_len + 1] = c & 0x1F;
+    }
+    ret[hrp_len] = 0;
+}
+
+__device__ uint32_t PolyMod(uint8_t *values, size_t len) {
+    uint32_t chk = 1;
+    // uint32_t generator[] = {0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3};
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t top = (chk >> 25);
+        chk = (chk & 0x1ffffff) << 5 ^ values[i];
+        for (int j = 0; j < 5; ++j) {
+            // chk ^= ((top >> j) & 1) ? generator[j] : 0;
+            chk ^= ((top >> j) & 1) ? poly_mod_generator[j] : 0;
+        }
+    }
+    return chk;
+}
+
+__device__ void CreateChecksum(const char *hrp, uint8_t *data, size_t data_len, uint8_t *checksum) {
+    size_t hrp_len = bn_strlen(hrp);
+    size_t total_len = hrp_len * 2 + 1 + data_len + CHECKSUM_LENGTH;
+    uint8_t values[MAX_VALUES_LEN];
+    memset(values, 0, sizeof(values));
+    ExpandHrp(hrp, values);
+    memcpy(values + hrp_len * 2 + 1, data, data_len);
+
+    uint32_t polyMod = PolyMod(values, total_len) ^ 1;
+    for (int i = 0; i < CHECKSUM_LENGTH; ++i) {
+        checksum[i] = (polyMod >> 5 * (5 - i)) & 0x1F;
+    }
+}
+
+__device__ void Encode(const char *hrp, uint8_t *data, size_t data_len, char *result) {
+    uint8_t converted_data[MAX_RESULT_LEN];
+    size_t converted_data_len;
+    ConvertBytesTo5BitGroups(data, data_len, converted_data, &converted_data_len);
+
+    uint8_t checksum[CHECKSUM_LENGTH];
+    CreateChecksum(hrp, converted_data, converted_data_len, checksum);
+
+    size_t hrp_len = bn_strlen(hrp);
+    size_t result_len = hrp_len + 1 + converted_data_len + CHECKSUM_LENGTH;
+
+    bn_strcpy(result, hrp);
+    result[hrp_len] = '1';
+
+    for (size_t i = 0; i < converted_data_len; ++i) {
+        result[hrp_len + 1 + i] = CHARSET[converted_data[i]];
+    }
+
+    for (size_t i = 0; i < CHECKSUM_LENGTH; ++i) {
+        result[hrp_len + 1 + converted_data_len + i] = CHARSET[checksum[i]];
+    }
+
+    result[result_len] = '\0';
+}
+
+```
+
+# p_chain.h
+```
+#include "pbkdf2.h"
+#include "sha256.h"
+#include "ripmd160.h"
+#include "bech32.h"
+#include "bip32.h"
+#include "point.h"
+#include "public_key.h"
+#include "child_key.h"
+
+__device__ void strcpy_cuda(char *dest, const char *src) {
+    while (*src) {
+        *dest = *src;
+        dest++;
+        src++;
+    }
+    *dest = '\0';
+}
+
+__device__ void strcat_cuda(char *dest, const char *src) {
+    while (*dest) dest++;
+    while (*src) {
+        *dest = *src;
+        dest++;
+        src++;
+    }
+    *dest = '\0';
+}
+
+struct P_CHAIN_ADDRESS_STRUCT {
+    char data[MAX_RESULT_LEN + 2];
+};
+
+__device__ void generate_salt(const char* prefix, const char* passphrase, char* salt, int max_salt_len) {
+    int i = 0;
+    int j = 0;
+
+    // Copy prefix
+    while (prefix[i] != '\0' && i < max_salt_len - 1) {
+        salt[i] = prefix[i];
+        i++;
+    }
+
+    // Copy passphrase
+    while (passphrase[j] != '\0' && i < max_salt_len - 1) {
+        salt[i] = passphrase[j];
+        i++;
+        j++;
+    }
+
+    // Null-terminate the salt
+    salt[i] = '\0';
+}
+
+__device__ P_CHAIN_ADDRESS_STRUCT restore_p_chain_address(uint8_t *m_mnemonic, char *passphrase) {
+    P_CHAIN_ADDRESS_STRUCT completeAddress;
+
+    // Calculate the length of the passphrase
+    int passphrase_len = 0;
+    while (passphrase[passphrase_len] != '\0') {
+        passphrase_len++;
+    }
+
+    // Define the maximum salt length
+    #define MAX_SALT_LEN 256
+    char salt[MAX_SALT_LEN];
+
+    // Copy the prefix and passphrase into the salt
+    const char *prefix = "mnemonic";
+    int prefix_len = 8; // length of "mnemonic"
+    for (int i = 0; i < prefix_len; i++) {
+        salt[i] = prefix[i];
+    }
+    for (int i = 0; i < passphrase_len; i++) {
+        salt[prefix_len + i] = passphrase[i];
+    }
+    salt[prefix_len + passphrase_len] = '\0'; // Null-terminate the salt
+    
+    unsigned char bip39seed[64];  // This will hold the generated seed
+    // Initialize bip39seed to zeros
+    for (int i = 0; i < 64; ++i) {
+        bip39seed[i] = 0;
+    }
+
+    // Call pbkdf2_hmac to perform the bip39seed key derivation
+    compute_pbkdf2(
+        (uint8_t *) m_mnemonic, 
+        my_strlen((const char*) m_mnemonic), 
+        (uint8_t *) salt, 
+        my_strlen((const char*) salt),
+	    2048, 
+        64,
+        bip39seed
+        );
+
+    // Bip32FromSeed
+    BIP32Info master_key = bip32_from_seed_kernel(bip39seed, 64);
+
+    // Child key derivation
+	uint32_t index44 = 0x8000002C;
+	uint32_t index9000 = 0x80002328;
+	uint32_t index0Hardened = 0x80000000;
+	uint32_t index0 = 0x00000000;
+
+    BIP32Info child_key;
+    child_key = GetChildKeyDerivation(master_key.master_private_key, master_key.chain_code, index44);
+    child_key = GetChildKeyDerivation(child_key.master_private_key, child_key.chain_code, index9000);
+    child_key = GetChildKeyDerivation(child_key.master_private_key, child_key.chain_code, index0Hardened);
+    child_key = GetChildKeyDerivation(child_key.master_private_key, child_key.chain_code, index0);
+    child_key = GetChildKeyDerivation(child_key.master_private_key, child_key.chain_code, index0);
+
+    // Final public key derivation
+    // Buffer for the public key
+    unsigned char buffer[33];
+    GetPublicKey(buffer, child_key.master_private_key);
+
+    // Convert buffer to hex string
+    char publicKeyHex[67];  // 66 characters for the hex string + 1 for null terminator
+    bufferToHex(buffer, publicKeyHex);
+
+    // Copy publicKeyBytes to publicKeyBytes_test
+    unsigned char publicKeyBytes[33];
+    for (int i = 0; i < 33; i++) {
+        publicKeyBytes[i] = buffer[i];
+    }
+
+    // Compute SHA256
+    uint8_t sha256Hash[SHA256_DIGEST_SIZE];
+    compute_sha256(publicKeyBytes, 33, sha256Hash);
+
+    // ripemd160
+    unsigned char digest[RIPEMD160_DIGEST_SIZE];
+
+    // Hash the message
+    ripemd160((const uint8_t *)sha256Hash, MY_SHA256_DIGEST_LENGTH, digest);
+
+    // Bech32
+    char b32Encoded[MAX_RESULT_LEN];
+    Encode("avax", digest, RIPEMD160_DIGEST_LENGTH, b32Encoded);
+
+    // Create the complete P-chain address with "P-" prefix
+    strcpy_cuda(completeAddress.data, "P-");
+    strcat_cuda(completeAddress.data, b32Encoded);
+
+    return completeAddress;
+}
+```
+
+# sha256.h
+```
+// #include <cuda_runtime.h>
+#include <cstdint>
+
+// #define CH(x,y,z)  ((z) ^ ((x) & ((y) ^ (z)))) // SHA256 version
+// #define MAJ(x,y,z) (((x) & (y)) | ((z) & ((x) | (y)))) // SHA256 version
+#define ROTR(x,n)  (((x) >> (n)) | ((x) << (32 - (n))))
+#define S0(x)      (ROTR(x, 2) ^ ROTR(x,13) ^ ROTR(x,22))
+#define S1(x)      (ROTR(x, 6) ^ ROTR(x,11) ^ ROTR(x,25))
+#define s0(x)      (ROTR(x, 7) ^ ROTR(x,18) ^ ((x) >> 3))
+#define s1(x)      (ROTR(x,17) ^ ROTR(x,19) ^ ((x) >> 10))
+
+#define SHA256_BLOCK_SIZE 64
+#define SHA256_DIGEST_SIZE 32
+
+__device__ __constant__ uint32_t d_K[64] = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+};
+
+struct SHA256_CTX {
+    uint32_t state[8];
+    uint64_t count;
+    uint8_t buffer[SHA256_BLOCK_SIZE];
+};
+
+// __device__ void sha256_init(SHA256_CTX *ctx) {
+//     ctx->state[0] = 0x6a09e667;
+//     ctx->state[1] = 0xbb67ae85;
+//     ctx->state[2] = 0x3c6ef372;
+//     ctx->state[3] = 0xa54ff53a;
+//     ctx->state[4] = 0x510e527f;
+//     ctx->state[5] = 0x9b05688c;
+//     ctx->state[6] = 0x1f83d9ab;
+//     ctx->state[7] = 0x5be0cd19;
+//     ctx->count = 0;
+// }
+// Global constant SHA256_CTX
+__device__ __constant__ SHA256_CTX global_ctx = {
+    {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19},
+    0,
+    {0}
+};
+
+__device__ void sha256_transform(SHA256_CTX *ctx, const uint8_t *data) {
+    uint32_t a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
+
+    for (i = 0, j = 0; i < 16; ++i, j += 4)
+        m[i] = (data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | (data[j + 3]);
+    for (; i < 64; ++i)
+        m[i] = s1(m[i - 2]) + m[i - 7] + s0(m[i - 15]) + m[i - 16];
+
+    a = ctx->state[0];
+    b = ctx->state[1];
+    c = ctx->state[2];
+    d = ctx->state[3];
+    e = ctx->state[4];
+    f = ctx->state[5];
+    g = ctx->state[6];
+    h = ctx->state[7];
+
+    for (i = 0; i < 64; ++i) {
+        t1 = h + S1(e) + CH(e, f, g) + d_K[i] + m[i];
+        t2 = S0(a) + MAJ(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+    }
+
+    ctx->state[0] += a;
+    ctx->state[1] += b;
+    ctx->state[2] += c;
+    ctx->state[3] += d;
+    ctx->state[4] += e;
+    ctx->state[5] += f;
+    ctx->state[6] += g;
+    ctx->state[7] += h;
+}
+
+__device__ void sha256_update(SHA256_CTX *ctx, const uint8_t *data, size_t len) {
+    size_t i;
+
+    for (i = 0; i < len; ++i) {
+        ctx->buffer[ctx->count % 64] = data[i];
+        ctx->count++;
+        if ((ctx->count % 64) == 0) {
+            sha256_transform(ctx, ctx->buffer);
+        }
+    }
+}
+
+__device__ void sha256_final(SHA256_CTX *ctx, uint8_t *hash) {
+    uint32_t i;
+    uint64_t bits_count = ctx->count * 8;
+
+    // Pad the message
+    ctx->buffer[ctx->count % 64] = 0x80;
+    ctx->count++;
+
+    // If we don't have room for the length (8 bytes), transform this block and pad the next one
+    if ((ctx->count % 64) > 56) {
+        while ((ctx->count % 64) != 0) {
+            ctx->buffer[ctx->count % 64] = 0;
+            ctx->count++;
+        }
+        sha256_transform(ctx, ctx->buffer);
+    }
+
+    // Pad up to 56 bytes (leaving 8 for the length)
+    while ((ctx->count % 64) < 56) {
+        ctx->buffer[ctx->count % 64] = 0;
+        ctx->count++;
+    }
+
+    // Append the length in big-endian format
+    for (i = 0; i < 8; i++) {
+        ctx->buffer[56 + i] = (bits_count >> ((7 - i) * 8)) & 0xFF;
+    }
+
+    sha256_transform(ctx, ctx->buffer);
+
+    // Output the hash
+    for (i = 0; i < 8; i++) {
+        hash[i * 4] = (ctx->state[i] >> 24) & 0xFF;
+        hash[i * 4 + 1] = (ctx->state[i] >> 16) & 0xFF;
+        hash[i * 4 + 2] = (ctx->state[i] >> 8) & 0xFF;
+        hash[i * 4 + 3] = ctx->state[i] & 0xFF;
+    }
+}
+
+__device__ void compute_sha256(const uint8_t *msg, uint32_t mlen, uint8_t *outputHash) {
+    // SHA256_CTX ctx;
+    // sha256_init(&ctx);
+    SHA256_CTX ctx = global_ctx;
+    sha256_update(&ctx, msg, mlen);
+    sha256_final(&ctx, outputHash);
+}
+
+// __device__ void print_as_hex(const uint8_t *data, const uint32_t len) {
+//     for (uint32_t i = 0; i < len; i++) {
+//         printf("%02x", data[i]);
+//     }
+//     printf("\n");
+// }
+```
+
+# bignum_report.h
+```
+// bignum.h
+#include <limits.h>
+#include <assert.h>
+#include <stdio.h>
+#include <stdint.h>
+
+#ifndef BN_ULONG
+#define BN_ULONG unsigned long long
+#endif
+
+#define BN_ULONG_MAX ((BN_ULONG)-1)
+
+#define debug_print false
+#define bn_mul_caching false
+#define collect_stats false
+#define BN_MASK2 0xffffffff
+#define BN_ULONG_NUM_BITS (sizeof(BN_ULONG) * 8) // 64 bits
+#define MAX_BIGNUM_SIZE 10     // Allow room for temp calculations
+#define PUBLIC_KEY_SIZE 33  // Assuming a 33-byte public key (compressed format)
+
+// Debug variables
+#define DEVICE_CLOCK_RATE 1708500
+__device__ unsigned int debug_loop_counter_bn_div = 0;  // Global loop counter variable
+__device__ double elapsed_time_bn_div = 0;
+__device__ double elapsed_time_bn_div_binary = 0;
+__device__ double elapsed_time_bn_mod_inverse = 0;
+__device__ double elapsed_time_bn_copy = 0;
+
+// Statistics module ++
+#define MAX_FUNCTIONS 100
+
+enum FunctionIndex {
+    FN_MAIN,
+    FN_BN_ADD,
+    FN_BN_SUB,
+    FN_BN_MUL,
+    FN_BN_DIV,
+    FN_BN_MOD,
+    FN_POINT_ADD,
+    FN_POINT_DOUBLE,
+    FN_EC_POINT_SCALAR_MUL,
+    FN_LEFT_SHIFT,
+    FN_CACHED_BN_MUL,
+    FN_FIND_IN_CACHE,
+    FN_COUNT
+};
+
+__device__ unsigned int g_function_calls[MAX_FUNCTIONS];
+__device__ unsigned long long g_function_times[MAX_FUNCTIONS];
+
+__device__ void record_function(FunctionIndex fn, clock_t start_time) {
+    if (!collect_stats) return;
+    clock_t end_time = clock64();
+    atomicAdd(&g_function_calls[fn], 1);
+    atomicAdd(&g_function_times[fn], end_time - start_time);
+}
+
+__device__ const char* get_function_name(FunctionIndex fn) {
+    switch(fn) {
+        case FN_MAIN: return "testKernel";
+        case FN_BN_ADD: return "bn_add";
+        case FN_BN_SUB: return "bn_sub";
+        case FN_BN_MUL: return "bn_mul";
+        case FN_BN_DIV: return "bn_div";
+        case FN_BN_MOD: return "bn_mod";
+        case FN_POINT_ADD: return "point_add";
+        case FN_POINT_DOUBLE: return "point_double";
+        case FN_EC_POINT_SCALAR_MUL: return "ec_point_scalar_mul";
+        case FN_LEFT_SHIFT: return "left_shift";
+        case FN_CACHED_BN_MUL: return "cached_bn_mul";
+        case FN_FIND_IN_CACHE: return "find_in_cache";
+        default: return "Unknown";
+    }
+}
+
+__device__ void print_performance_report() {
+    if (!collect_stats) return;
+    // Print CSV header
+    printf("Function,Calls,TotalTime(cycles)\n");
+    
+    // Print data for each function
+    for (int i = 0; i < FN_COUNT; i++) {
+        printf("%s,%u,%llu\n", 
+               get_function_name((FunctionIndex)i), 
+               g_function_calls[i], 
+               g_function_times[i]);
+    }
+}
+// Statistics module --
+
+typedef struct bignum_st {
+  BN_ULONG d[MAX_BIGNUM_SIZE];
+  unsigned char top;
+  bool neg;
+} BIGNUM;
+
+// Global zero-initialized BIGNUM
+__device__ const BN_ULONG ZERO_ARRAY[MAX_BIGNUM_SIZE] = {0};
+__device__ const BIGNUM ZERO_BIGNUM = {
+    {0},                  // d (will be properly initialized in init_zero)
+    1,                    // top (unsigned char)
+    0                    // neg (bool)
+};
+
+// Initialize BIGNUM
+__device__ void init_zero(BIGNUM *bn) {
+    *bn = ZERO_BIGNUM;
+}
+
+__device__ unsigned char find_top(const BIGNUM *bn) {
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= 0; i--) {
+        if (bn->d[i] != 0) {
+            return i + 1;
+        }
+    }
+    return 1;
+}
+
+__device__ unsigned char find_top_optimized(const BIGNUM *bn, const char start_index) {
+    const char start = start_index > MAX_BIGNUM_SIZE ? MAX_BIGNUM_SIZE : start_index;
+    for (char i = start - 1; i >= 0; i--) {
+        if (bn->d[i] != 0) {
+            return i + 1;
+        }
+    }
+    return 1;
+}
+
+__device__ void free_bignum(BIGNUM *bn) {
+    delete[] bn->d;
+}
+
+__device__ void bn_print(const char* msg, BIGNUM* a) {
+    if (!debug_print) return;
+    
+    printf("%s", msg);
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= 0; i--) {
+        // Print words up to top - 1 with appropriate formatting
+        if (i == MAX_BIGNUM_SIZE - 1) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf("%016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void bn_print_constant(const char* msg, BIGNUM* a, int tid) {
+    printf("Thread %d - %s", tid, msg);
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= 0; i--) {
+        // Print words up to top - 1 with appropriate formatting
+        if (i == MAX_BIGNUM_SIZE - 1) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf("%016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void print_as_hex(const uint8_t *data, const uint32_t len) {
+    for (uint32_t i = 0; i < len; i++) {
+        printf("%02x", data[i]);
+    }
+    printf("\n");
+}
+
+__device__ bool bn_add(BIGNUM *result, BIGNUM *a, BIGNUM *b);
+__device__ int bn_mod(BIGNUM *r, BIGNUM *m, BIGNUM *d);
+__device__ bool bn_is_zero(BIGNUM *a);
+
+__device__ size_t bn_strlen(const char *str) {
+    size_t len = 0;
+    while (*str != '\0') {
+        ++len;
+        ++str;
+    }
+    return len;
+}
+
+__device__ void bn_strcpy(char *dest, const char *src) {
+    size_t i = 0;
+    while (src[i] != '\0') {
+        dest[i] = src[i];
+        ++i;
+    }
+    dest[i] = '\0';
+}
+
+__device__ void print_as_hex_char(unsigned char *data, int len) {
+    if (debug_print) {
+        for (int i = 0; i < len; i++) {
+            printf("%02x", data[i]);
+        }
+        printf("\n");
+    }
+}
+
+__device__ void bn_print_short(const char* msg, BIGNUM* a) {
+    if (!debug_print) return;
+    printf("%s", msg);
+    if (a->top == 0) {
+        printf("0\n");  // Handle the case where BIGNUM is zero
+        return;
+    }
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = a->top - 1; i >= 0; i--) {
+        // Print words up to top - 1 with appropriate formatting
+        if (i == a->top - 1) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf("%016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void bn_print_reversed(const char* msg, BIGNUM* a) {
+    if (!debug_print) return;
+    printf("%s", msg);
+    if (a->top == 0) {
+        printf("0\n");  // Handle the case where BIGNUM is zero
+        return;
+    }
+    if (a->neg) {
+        printf("-");  // Handle the case where BIGNUM is negative
+    }
+    for (int i = 0; i < a->top; i++) {
+        if (i == 0) {
+            printf("%llx", a->d[i]);
+        } else {
+            printf(" %016llx", a->d[i]);
+        }
+    }
+    printf("\n");
+}
+
+__device__ void debug_printf(const char *fmt, ...) {
+    if (debug_print) {
+        printf(fmt);
+    }
+}
+
+__device__ BN_ULONG bn_sub_words(BN_ULONG* r, const BN_ULONG* a, const BN_ULONG* b, const int n) {
+  
+  BN_ULONG borrow = 0;
+  for (int i = 0; i < n; i++) {
+    BN_ULONG t1 = a[i];
+    BN_ULONG t2 = b[i];
+    BN_ULONG w = (t1 - borrow) - t2;
+    borrow = (w > t1); // handle borrow
+    r[i] = w; 
+  }
+
+  return borrow;
+}
+
+__device__ void reverse(BN_ULONG* d, int n) {
+  BN_ULONG tmp;
+  for(int i=0; i < n/2; i++) {
+    tmp = d[i];
+    d[i] = d[n - i - 1];
+    d[n - i - 1] = tmp; 
+  }
+}
+
+__device__ void init_one(BIGNUM *bn) {
+    // Initialize the BIGNUM to zero
+    *bn = ZERO_BIGNUM;
+    
+    // Set the least significant word to 1
+    bn->d[0] = 1;
+    
+    // Set the top to 1 (as there is one significant digit)
+    bn->top = 1;
+}
+
+__device__ int bn_cmp(BIGNUM* a, BIGNUM* b) {
+    // -1: a < b
+    // 0: a == b
+    // 1: a > b
+    if (a->neg != b->neg) {
+        return a->neg ? -1 : 1;
+    }
+    // a->top = find_top(a);
+    b->top = find_top(b);
+    if (a->top != b->top) {
+        return a->top > b->top ? 1 : -1;
+    }
+
+    for (int i = a->top - 1; i >= 0; i--) {
+        if (a->d[i] != b->d[i]) {
+            return a->d[i] > b->d[i] ? 1 : -1;
+        }
+    }
+
+    return 0;
+}
+
+__device__ int bn_cmp_abs(BIGNUM *a, BIGNUM *b) {
+    if (a->top > b->top)
+        return 1;
+    if (b->top > a->top)
+        return -1;
+
+    for (int i = a->top - 1; i >= 0; i--) {
+        if (a->d[i] > b->d[i])
+            return 1;
+        if (b->d[i] > a->d[i])
+            return -1;
+    }
+    return 0;
+}
+
+__device__ int bn_cmp_one(BIGNUM* a) {
+    int a_top = a->top - 1;
+
+    // Skip leading zeroes to find the actual top for a.
+    // Though theoretically, since we are comparing against 1, there shouldn't be leading zeroes. This is for safety.
+    while (a_top >= 0 && a->d[a_top] == 0) a_top--;
+
+    // a cannot be one if it's negative or if it has more than one significant digit that isn't zero
+    if (a->neg || a_top != 0) { 
+        return (a->neg) ? -1 : 0; // Return -1 if a is negative, indicating a is less than one;
+                                  // otherwise, return 0 as an indication of inequality
+    }
+
+    // At this point, a_top should be 0 (indicating only one significant digit), and a should be positive
+    // Now, directly compare a->d[0] with 1
+    if (a->d[0] > 1) return 1;  // a is greater than one
+    if (a->d[0] < 1) return -1; // a is less than one
+
+    return 0; // a is equal to one
+}
+
+// Helper function to perform a deep copy of BIGNUM
+__device__ void bn_copy(BIGNUM *dest, BIGNUM *src) {
+    // Declare variable to store clock() value
+    clock_t start, end;
+    // Start the clock
+    start = clock64();    
+
+    // Init dst as zero
+    init_zero(dest);
+
+    if (dest == nullptr || src == nullptr) {
+        return;
+    }
+
+    // Copy the neg and top fields
+    dest->neg = src->neg;
+    dest->top = src->top;
+
+    int i;
+
+    // Copy the array of BN_ULONG digits.
+    for (i = 0; i < src->top; i++) {
+        dest->d[i] = src->d[i];
+    }
+
+    // Set the rest of the words in dest to 0 if dest's top is larger
+    for (i = src->top; i < MAX_BIGNUM_SIZE; i++) {
+        dest->d[i] = 0;
+    }
+   
+    // End the clock
+    end = clock64();
+    // Calculate the elapsed time
+    elapsed_time_bn_copy += (double)(end - start);
+}
+
+__device__ void absolute_add(BIGNUM *result, const BIGNUM *a, const BIGNUM *b) {
+    // Determine the maximum size to iterate over
+    unsigned char max_top = max(a->top, b->top);
+    BN_ULONG carry = 0;
+
+    unsigned char i;
+
+    // Initialize result
+    for (i = 0; i <= max_top; ++i) {
+        result->d[i] = 0;
+    }
+    result->top = max_top;
+
+    for (i = 0; i <= max_top; ++i) {
+        // Extract current words or zero if one bignum is shorter
+        BN_ULONG ai = (i < a->top) ? a->d[i] : 0;
+        BN_ULONG bi = (i < b->top) ? b->d[i] : 0;
+
+        // Calculate sum and carry
+        BN_ULONG sum = ai + bi + carry;
+
+        // Store result
+        result->d[i] = sum; // No need for masking as BN_ULONG is already the correct size
+
+        // Calculate carry
+        carry = (sum < ai) || (carry > 0 && sum == ai) ? 1 : 0;
+    }
+
+    // Handle carry out, expand result if necessary
+    if (carry > 0) {
+        if (result->top < MAX_BIGNUM_SIZE - 1) {
+            result->d[result->top] = carry;
+            result->top++;
+        } else {
+            // Handle error: Result BIGNUM doesn't have space for an additional word.
+            // This should potentially be reported back to the caller.
+        }
+    }
+
+    // Find the real top after addition (no leading zeroes)
+    result->top = find_top_optimized(result, max_top+1);
+}
+
+__device__ void absolute_subtract(BIGNUM *result, BIGNUM *a, BIGNUM *b) {
+
+    unsigned char max_top = max(a->top, b->top);
+    BN_ULONG borrow = 0;
+    result->top = max_top;
+
+    for (unsigned char i = 0; i < max_top; ++i) {
+        BN_ULONG ai = (i < a->top) ? a->d[i] : 0;
+        BN_ULONG bi = (i < b->top) ? b->d[i] : 0;
+
+        // Perform subtraction
+        BN_ULONG diff = ai - bi - borrow;
+        
+        // Check if borrow occurred
+        if (ai < bi || (borrow && ai == bi)) {
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+
+        result->d[i] = diff;
+    }
+
+    // Normalize the result (remove leading zeros)
+    while (result->top > 0 && result->d[result->top - 1] == 0) {
+        result->top--;
+    }
+
+    // If the result is zero, ensure top is set to 1 and d[0] is 0
+    if (result->top == 0) {
+        result->top = 1;
+        result->d[0] = 0;
+    }
+}
+
+__device__ bool bn_subtract(BIGNUM *result, BIGNUM *a, BIGNUM *b) {
+    clock_t start = clock64();
+    // If one is negative and the other is positive, it's essentially an addition.
+    if (a->neg != b->neg) {
+        result->neg = a->neg; // The sign will be the same as the sign of 'a'.
+        absolute_add(result, a, b); // Perform the addition of magnitudes here because signs are different.
+        record_function(FN_BN_SUB, start);
+        return true;
+    }
+
+    // Compare the absolute values to decide the order of subtraction and sign of the result.
+    int cmp_res = bn_cmp_abs(a, b); // This function should compare the absolute values of 'a' and 'b'.
+    
+    if (cmp_res >= 0) {
+        // |a| >= |b|, perform a - b, result takes sign from 'a'.
+        result->neg = a->neg;
+        absolute_subtract(result, a, b);
+    } else {
+        // |b| > |a|, perform b - a instead, result takes opposite sign from 'a'.
+        result->neg = !a->neg;
+        absolute_subtract(result, b, a);
+    }
+
+    // Perform additional logic if underflow has been detected in absolute_subtract.
+    if (result->top == 0) { 
+        // Handle underflow if needed. 
+    }
+    record_function(FN_BN_SUB, start);
+    return true;
+}
+
+__device__ int absolute_compare(const BIGNUM* a, const BIGNUM* b) {
+    // absolute_compare logic:
+    //  1 when |a| is larger
+    // -1 when |b| is larger
+    //  0 when |a| and |b| are equal in absolute value
+
+    // Skip leading zeros and find the actual top for a
+    int a_top = a->top - 1;
+    while (a_top >= 0 && a->d[a_top] == 0) a_top--;
+
+    // Skip leading zeros and find the actual top for b
+    int b_top = b->top - 1;
+    while (b_top >= 0 && b->d[b_top] == 0) b_top--;
+
+    // Compare actual tops
+    if (a_top > b_top) return 1; // |a| is larger
+    if (a_top < b_top) return -1; // |b| is larger
+
+    // Both numbers have the same number of significant digits, compare digit by digit
+    for (int i = a_top; i >= 0; i--) {
+        if (a->d[i] > b->d[i]) return 1; // |a| is larger
+        if (a->d[i] < b->d[i]) return -1; // |b| is larger
+    }
+    return 0; // |a| and |b| are equal in absolute value
+}
+
+__device__ void bn_add_private(BIGNUM* a, BIGNUM* b, BIGNUM* r) {
+    int max = a->top > b->top ? a->top : b->top;
+    BN_ULONG carry = 0;
+    printf("Starting addition... max: %d\n", max);
+
+    for(int i=max-1; i>=0; i--) {
+        BN_ULONG ai = (i < a->top) ? a->d[i] : 0;
+        BN_ULONG bi = (i < b->top) ? b->d[i] : 0;
+
+        BN_ULONG sum = ai + bi + carry;
+        r->d[i] = sum;
+        carry = (sum < ai || (sum - ai) < bi) ? 1 : 0;
+    }
+
+    // If there's a carry after processing all words
+    if (carry) {
+        r->top = max + 1;
+        for (int i = r->top-1; i > 0; i--) {   // Shift every word to the right
+            r->d[i] = r->d[i-1];
+        }
+        r->d[0] = carry;  // Place the carry on the leftmost side
+    } else {
+        r->top = max;
+    }
+}
+
+__device__ bool bn_add(BIGNUM *result, BIGNUM *a, BIGNUM *b) {
+    clock_t start = clock64();
+    init_zero(result);
+    unsigned char max_top = max(a->top, b->top);
+
+    if (a->neg == b->neg) {
+        // Both numbers have the same sign, so we can directly add them.
+        absolute_add(result, a, b);
+        result->neg = a->neg; // The sign will be the same as both operands.
+    } else {
+        // The numbers have different signs, so we need to compare their absolute values to decide on the operation.
+        int cmp_result = absolute_compare(a, b);
+        if (cmp_result < 0) {
+            // |b| is greater than |a|, so we'll do b - a and assign the sign of b to the result.
+            absolute_subtract(result, b, a);
+            result->neg = b->neg;
+        } else if (cmp_result > 0) {
+            // |a| is greater than |b|, so we'll do a - b and assign the sign of a to the result.
+            absolute_subtract(result, a, b);
+            result->neg = a->neg;
+        } else {
+            // |a| is equal to |b|, so the result is 0.
+            // The result of adding two numbers with different signs but equal magnitude is 0.
+            result->neg = 0; // Set sign to 0 for non-negative.
+            result->top = 1; // The result is 0, so top is 1 to denote one valid word which is zero.
+            result->d[0] = 0;
+        }
+    }
+
+    record_function(FN_BN_ADD, start);
+    return true;
+}
+
+__device__ void big_num_add_mod(BN_ULONG *result, BN_ULONG *a, BN_ULONG *b, BN_ULONG *n, int num_words) {
+    BN_ULONG carry = 0;
+    for (int i = num_words - 1; i >= 0; i--) {
+        BN_ULONG sum = a[i] + b[i] + carry;
+        carry = (sum < a[i]) || (carry > 0 && sum == a[i]) ? 1 : 0;
+        result[i] = sum;
+    }
+
+    // Modular reduction: simply subtract n from result if result >= n
+    bool greater_or_equal = true;
+    for (int i = 0; i < num_words; i++) {
+        if (result[i] < n[i]) {
+            greater_or_equal = false;
+            break;
+        }
+        if (result[i] > n[i]) break;
+    }
+
+    if (greater_or_equal) {
+        // At this point, we know result >= n, so perform result -= n
+        carry = 0;
+        for (int i = num_words - 1; i >= 0; i--) {
+            BN_ULONG diff = result[i] - n[i] - carry;
+            carry = (result[i] < n[i]) || (carry > 0 && result[i] == n[i]) ? 1 : 0;
+            result[i] = diff;
+        }
+    }
+}
+
+__device__ void robust_BN_nnmod(BIGNUM *r, BIGNUM *m, BIGNUM *d) {
+    // Copy m into r
+    bn_copy(r, m);
+    r->neg = 0;  // Result is non-negative
+
+    // Now we'll reduce r modulo d, using simple division
+    for (int i = 0; i < r->top; ++i) {
+        if (r->d[i] >= d->d[0]) {
+            BN_ULONG quotient = r->d[i] / d->d[0];
+            BN_ULONG remainder = r->d[i] % d->d[0];
+
+            // Subtract quotient*d from r
+            BN_ULONG borrow = 0;
+            for (int j = 0; j < d->top && i+j < r->top; ++j) {
+                unsigned long long sub = (unsigned long long)r->d[i+j] + BN_ULONG_MAX + 1 - 
+                                         (unsigned long long)d->d[j] * quotient - borrow;
+                r->d[i+j] = (BN_ULONG)sub;
+                borrow = (sub <= BN_ULONG_MAX) ? 1 : 0;
+            }
+
+            // Add back the remainder at position i
+            unsigned long long sum = (unsigned long long)r->d[i] + remainder;
+            r->d[i] = (BN_ULONG)sum;
+            BN_ULONG carry = (sum > BN_ULONG_MAX) ? 1 : 0;
+
+            // Propagate any carry
+            for (int j = i+1; j < r->top && carry; ++j) {
+                sum = (unsigned long long)r->d[j] + carry;
+                r->d[j] = (BN_ULONG)sum;
+                carry = (sum > BN_ULONG_MAX) ? 1 : 0;
+            }
+
+            // If there's still a carry, increase the size of r
+            if (carry && r->top < MAX_BIGNUM_SIZE) {
+                r->d[r->top] = carry;
+                r->top++;
+            }
+        }
+    }
+
+    // Ensure the result is smaller than d
+    while (bn_cmp(r, d) >= 0) {
+        bn_subtract(r, r, d);
+    }
+}
+
+// Public key derivation ++
+__device__ int bn_div(BIGNUM *a, BIGNUM *b, BIGNUM *q, BIGNUM *r);
+__device__ void bn_mul(BIGNUM *a, BIGNUM *b, BIGNUM *product);
+// bn_mul cache ++
+#define MAX_CACHE_SIZE 320
+
+typedef struct {
+    BN_ULONG key;
+    BIGNUM value;
+    int valid;
+} CacheEntry;
+
+typedef struct {
+    CacheEntry entries[MAX_CACHE_SIZE];
+} Cache;
+
+__device__ unsigned int hash(BN_ULONG key) {
+    return key % MAX_CACHE_SIZE;
+}
+
+__device__ void cache_init(Cache* cache) {
+    memset(cache, 0, sizeof(Cache));
+}
+
+__device__ void cache_set(Cache* cache, BN_ULONG key, BIGNUM* value) {
+    unsigned int index = hash(key);
+    cache->entries[index].key = key;
+    cache->entries[index].value = *value;
+    cache->entries[index].valid = 1;
+}
+
+__device__ int cache_get(Cache* cache, BN_ULONG key, BIGNUM* value) {
+    clock_t start = clock64();
+    unsigned int index = hash(key);
+    if (cache->entries[index].valid && cache->entries[index].key == key) {
+        *value = cache->entries[index].value;
+        record_function(FN_CACHED_BN_MUL, start);
+        return 1;
+    }
+    record_function(FN_CACHED_BN_MUL, start);
+    return 0;
+}
+
+__device__ void set_bn(BIGNUM *dest, const BIGNUM *src) {
+    debug_printf("set_bn 0\n");
+
+    // Check if dest has enough space to copy from src
+    if (MAX_BIGNUM_SIZE < src->top) {    
+        // Handle the situation appropriately
+        // Depending on how memory is managed, this could be an error or resize operation
+        return;
+    }
+
+    // Copy over the significant words from source to destination.
+    for (int i = 0; i < src->top; ++i) {
+        debug_printf("set_bn 1.%d\n", i);
+        dest->d[i] = src->d[i];
+    }
+
+    // Zero out any remaining entries in the array if the source 'top' is less than the dest 'dmax'
+    for (int i = src->top; i < MAX_BIGNUM_SIZE; ++i) {
+        debug_printf("set_bn 2.%d\n", i);
+        dest->d[i] = 0;
+    }
+
+    debug_printf("set_bn 3\n");
+
+    // Set the 'top' and 'neg' flags after zeroing
+    dest->top = src->top;
+    dest->neg = src->neg;
+}
+
+
+
+// Assuming 'a' and 'mod' are coprime, output 'x' such that: a*x ≡ 1 (mod 'mod')
+// Pseudo code for Extended Euclidean Algorithm in CUDA
+__device__ int extended_gcd(BIGNUM *a, BIGNUM *mod, BIGNUM *x, BIGNUM *y) {
+    // Initialization of prev_x, x, last_y, and y is omitted here but important.
+    BIGNUM prev_x, last_y, last_remainder, remainder, quotient, temp;
+    // Initialize prev_x = 1, x = 0, last_y = 0, y = 1 
+    // Initialize last_remainder = mod, remainder = a
+
+    // Initialize a BIGNUM for zero.
+    BIGNUM zero;
+    init_zero(&zero);
+    BIGNUM temp_remainder;
+    init_zero(&temp_remainder);
+
+    while (bn_cmp(&remainder, &zero) != 0) {
+        bn_div(&last_remainder, &remainder, &quotient, &temp_remainder);
+        BIGNUM swap_temp = last_remainder; // Temporary storage for the swap
+        bn_copy(&last_remainder, &temp_remainder);
+        bn_copy(&temp_remainder, &swap_temp);
+
+        bn_mul(&quotient, x, &temp); // temp = quotient*x
+        bn_subtract(&prev_x, &temp, &prev_x); // new prev_x = prev_x - temp
+        bn_mul(&quotient, y, &temp); // temp = quotient*y
+        bn_subtract(&last_y, &temp, &last_y); // new last_y = last_y - temp
+    }
+
+    // Clean up
+    delete &temp_remainder; // Only if dynamic memory is allowed - if you statically allocated, this is unnecessary
+    
+    set_bn(x, &prev_x);
+    set_bn(y, &last_y);
+
+    return 1; // In this simplified version, we'd return the gcd, but we're presuming a==1
+}
+
+__device__ void mod_inv(BIGNUM *value, BIGNUM *mod, BIGNUM *inv) {
+    debug_printf("mod_inv 0\n");
+    BIGNUM x, y;
+    // You need to make sure that BIGNUM x, y are initialized properly with minted memory
+    // You also need a proper gcd implementation on GPU here.
+    int g = extended_gcd(value, mod, &x, &y);
+    
+    // In case x is negative, we add mod to it, assuming mod>0
+    if (x.neg) {
+        debug_printf("mod_inv a.0\n");
+        // BN_ULONG zero = 0;
+        bn_add(&x, mod, inv);
+        debug_printf("mod_inv a.1\n");
+        bn_mod(inv, mod, inv);
+        debug_printf("mod_inv a.2\n");
+    } else {
+        debug_printf("mod_inv b.0\n");
+        bn_mod(&x, mod, inv);
+        debug_printf("mod_inv b.1\n");
+    }
+}
+
+__device__ void bn_mul(BIGNUM *a, BIGNUM *b, BIGNUM *product) {
+    init_zero(product);
+    
+    for (int i = 0; i < a->top; ++i) {
+        unsigned int a_lo = (unsigned int)(a->d[i]);
+        unsigned int a_hi = (unsigned int)(a->d[i] >> 32);
+        unsigned long long carry = 0;
+        for (int j = 0; j < b->top || carry != 0; ++j) {
+            unsigned int b_lo = (unsigned int)((j < b->top) ? b->d[j] : 0);
+            unsigned int b_hi = (unsigned int)(((j < b->top) ? b->d[j] : 0) >> 32);
+
+            // Perform multiplication using 32-bit halves
+            unsigned long long lo_lo = (unsigned long long)a_lo * b_lo;
+            unsigned long long lo_hi = (unsigned long long)a_lo * b_hi;
+            unsigned long long hi_lo = (unsigned long long)a_hi * b_lo;
+            unsigned long long hi_hi = (unsigned long long)a_hi * b_hi;
+
+            // Combine the results
+            unsigned long long temp = product->d[i + j] + (lo_lo & 0xFFFFFFFF) + (carry & 0xFFFFFFFF);
+            unsigned long long new_carry = (temp >> 32) + (lo_lo >> 32) + (lo_hi & 0xFFFFFFFF) + (hi_lo & 0xFFFFFFFF) + (carry >> 32);
+            product->d[i + j] = (temp & 0xFFFFFFFF) | (new_carry << 32);
+            carry = (new_carry >> 32) + (lo_hi >> 32) + (hi_lo >> 32) + hi_hi;
+        }
+        if (carry != 0) {
+            product->d[i + b->top] = carry;
+        }
+    }
+    
+    // Update the top
+    product->top = a->top + b->top;
+    while (product->top > 1 && product->d[product->top - 1] == 0) {
+        --product->top;
+    }
+    product->neg = a->neg ^ b->neg;
+}
+
+__device__ void bn_add_bit(BIGNUM *a, int bit_index) {
+    // Determine the word in the array where this bit resides.
+    int word_index = bit_index / (sizeof(BN_ULONG) * 8);
+    int bit_in_word = bit_index % (sizeof(BN_ULONG) * 8);
+
+    // Set this bit. BN_ULONG is assumed to be large enough to handle the shifts without overflow.
+    BN_ULONG bit_to_set = ((BN_ULONG)1) << bit_in_word;
+
+    // Add the bit to the BIGNUM. This is safe from overflow because we're only setting one bit.
+    a->d[word_index] |= bit_to_set;
+
+    // Update 'top'. If we added a bit beyond the current 'top', we'll need to expand it.
+    if (word_index >= a->top) {
+        // Make sure we've added a bit that's not in the leading zeroes of the BIGNUM.
+        // If so, `top` needs to reflect this new significant word.
+        a->top = word_index + 1;
+
+        // Ensure all bits above the current one are set to 0 in the new top 'word'.
+        for (int i = bit_in_word + 1; i < sizeof(BN_ULONG) * 8; i++) {
+            a->d[word_index] &= ~(((BN_ULONG)1) << i);
+        }
+    }
+}
+
+__device__ int bn_is_bit_set(const BIGNUM *bn, int bit_index) {
+    // Check if the bit index is within the range of the BIGNUM's length
+    if (bit_index < 0 || bit_index >= bn->top * BN_ULONG_NUM_BITS) {
+        return 0; // Bit out of range, return 0 indicating not set
+    }
+
+    // Calculate which word and which bit within that word we are interested in
+    int word_index = bit_index / BN_ULONG_NUM_BITS;
+    int bit_position = bit_index % BN_ULONG_NUM_BITS;
+
+    // Create a mask for the bit within the word
+    BN_ULONG mask = (BN_ULONG)1 << bit_position;
+
+    // Check if the bit is set and return the appropriate value
+    return (bn->d[word_index] & mask) ? 1 : 0;
+}
+
+__device__ int bn_mod_mpz(BIGNUM *r, BIGNUM *m, BIGNUM *d) {    
+    // Check if r and d are the same pointer
+    if (r == d) {
+        printf("bn_mod: ERR_R_PASSED_INVALID_ARGUMENT\n");
+        return 0;
+    }
+
+    // Create a temporary BIGNUM to store the divisor
+    BIGNUM temp_divisor;
+    init_zero(&temp_divisor);
+
+    // Copy the divisor to the temporary BIGNUM
+    if (r == d) {
+        bn_copy(&temp_divisor, d);
+        d = &temp_divisor;
+    }
+
+    // Perform the division
+    if (!bn_div(NULL, r, m, d)) {
+        return 0;
+    }
+
+    // Adjust the sign of the remainder if necessary
+    if (r->neg) {
+        // If the remainder is negative, add the absolute value of the divisor
+        if (d->neg) {
+            if (!bn_subtract(r, r, d)) {
+                return 0;
+            }
+        } else {
+            if (!bn_add(r, r, d)) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+__device__ int bn_mod(BIGNUM *r, BIGNUM *a, BIGNUM *n) {
+    // r: Remainder (updated)
+    // a: Dividend
+    // n: Modulus
+    bool debug = 0;
+    BIGNUM q;
+    init_zero(&q);
+
+    if (r == n) {
+        printf("bn_mod: ERR_R_PASSED_INVALID_ARGUMENT");
+        return 0;
+    }
+    if (!bn_div(&q, r, a, n)) {
+        return 0;
+    }
+
+    BIGNUM tmp;
+    init_zero(&tmp);
+
+    if (r->neg) {
+        if (debug) printf("r is negative\n");
+        bool result;
+        // If the remainder is negative, add the absolute value of the divisor
+        if (n->neg) {
+            if (debug) printf("d is negative\n");
+            result = bn_subtract(&tmp, r, n); // tmp = r - n
+            if (!result) {
+                return 0;
+            }
+            // copy tmp to r
+            bn_copy(r, &tmp);
+        } else {
+            if (debug) printf("d is not negative\n");
+            result = bn_add(&tmp, r, n); // tmp = r + n            
+            if (!result) {
+                return 0;
+            }
+            // copy tmp to r
+            bn_copy(r, &tmp);
+        }
+    }
+    if (debug) bn_print("<< r bn_mod: ", r);
+    if (debug) printf("-- bn_mod --\n");
+    return 1;
+}
+
+__device__ void mod_mul(BIGNUM *a, BIGNUM *b, BIGNUM *mod, BIGNUM *result) {
+    debug_printf("mod_mul 0\n");
+    BIGNUM product;
+    init_zero(&product);
+    debug_printf("mod_mul 1\n");
+    // Now, you can call the bn_mul function and pass 'product' to it
+    bn_mul(a, b, &product);
+    debug_printf("mod_mul 2\n");
+    
+    
+    bn_mod(&product, mod, result);
+
+    debug_printf("mod_mul 3\n");
+}
+
+__device__ bool bn_is_zero(BIGNUM *a) {
+    for (int i = 0; i < a->top; ++i) {
+        if (a->d[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__device__ bool bn_is_one(BIGNUM *a) {
+    // Assuming that BIGNUM stores the number in an array 'd' of integers
+    // and 'top' indicates the number of chunks being used.
+    // We also assume that 'd' is big-endian and 'top' is the index of the highest non-zero digit.
+    
+    // The number one would be represented with only the least significant digit being one
+    // and all other digits being zero.
+    if (a->top != 1) {  // If there are more than one digits in use, it cannot be one
+        return false;
+    }
+    if (a->d[0] != 1) {  // The number one should only have the least significant digit set to one
+        return false;
+    }
+    // Ensure that any other digits (if they exist in memory) are zero
+    // This isn't strictly necessary if the 'top' index is always accurate
+    // but is a good sanity check if there's any possibility of memory corruption or improper initialization.
+    for (int i = 1; i < MAX_BIGNUM_SIZE; ++i) {
+        if (a->d[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+__device__ int bn_is_negative(const BIGNUM *a) {
+    // Assuming the neg field is defined and holds the sign (0 for non-negative, 1 for negative)
+    return a->neg != 0;
+}
+
+__device__ void bn_set_word(BIGNUM *bn, BN_ULONG word) {
+    // Assuming d is a pointer to an array where the BIGNUM's value is stored
+    // and top is an integer representing the index of the most significant word + 1
+    // Setting a BIGNUM to a single-word value means that all other words are zero.
+
+    // Clear all words in the BIGNUM
+    for (int i = 0; i < MAX_BIGNUM_SIZE; ++i) {
+        bn->d[i] = 0;
+    }
+
+    // Set the least significant word to the specified value
+    bn->d[0] = word;
+
+    // Update top to indicate that there's at least one significant digit
+    bn->top = (word == 0) ? 0 : 1;
+
+    // If using a sign flag, ensure the BIGNUM is set to non-negative
+    if (bn->top) {
+        bn->neg = 0;
+    }
+}
+
+__device__ int get_msb_bit(BIGNUM *n) {
+    if (n->top == 0) return -1; // All zero
+
+    BN_ULONG word = n->d[n->top - 1]; 
+    if (word == 0) return -1; // Top word should not be zero 
+
+    // Use __clzll to count the leading zeros in the most significant word
+    unsigned int leading_zeros = __clzll(word);
+
+    // The position of the most significant bit is the number of bits in the word
+    // minus the number of leading zeros
+    return (n->top - 1) * BN_ULONG_NUM_BITS + (BN_ULONG_NUM_BITS - 1 - leading_zeros);
+}
+
+__device__ void bn_init_for_shift(BIGNUM *result, BIGNUM *a, int shift) {
+    // Calculate the number of words needed for the result after the shift.
+    int extra_word = (get_msb_bit(a) + shift) / BN_ULONG_NUM_BITS;
+    int new_top = a->top + extra_word;
+
+    // Ensure result has enough space to hold the new value.
+    // It should at least match the new_top or be the maximum allowed by MAX_BIGNUM_SIZE.
+    unsigned char result_dmax = min(new_top, MAX_BIGNUM_SIZE);
+
+    // Initialize the 'result' words to zero.
+    for (int i = 0; i < result_dmax; i++) {
+        result->d[i] = 0;
+    }
+
+    // Set the 'top' field for 'result'.
+    result->top = 0; // Will be set correctly in bn_lshift_res
+}
+
+
+__device__ void bn_lshift_res(BIGNUM *result, BIGNUM *a, int shift) {
+    bn_init_for_shift(result, a, shift);
+    if (shift <= 0) {
+        // No shift or invalid shift count; copy input to output with no modifications.
+        bn_copy(result, a);
+        return;
+    }
+
+    // Initialize result BIGNUM according to your BIGNUM structure definition
+    // Make sure that result->d has enough space to hold the result
+
+    // Perform the shift for each word from the least significant upwards.
+    BN_ULONG carry = 0;
+    for (int i = 0; i < a->top; ++i) {
+        BN_ULONG new_carry = a->d[i] >> (BN_ULONG_NUM_BITS - shift); // Capture the bits that will be shifted out.
+        result->d[i] = (a->d[i] << shift) | carry; // Shift current word and add bits from previous carry.
+        carry = new_carry; // Update carry for the next iteration.
+    }
+
+    // Assign the carry to the new most significant word if needed.
+    if (carry != 0) {
+        result->d[a->top] = carry; // Assign the carry to the new most significant word.
+        result->top = a->top + 1;
+    } else {
+        result->top = a->top;
+    }
+
+    // Initialize any remaining higher-order words to zero if necessary
+    // This depends on the internals of your BIGNUM structure.
+    for (int i = result->top; i < MAX_BIGNUM_SIZE; ++i) {
+        result->d[i] = 0;
+    }
+}
+
+__device__ void bn_rshift_one(BIGNUM *bn) {
+    if (bn_is_zero(bn)) {
+        return; // If the big number is zero, there's nothing to shift
+    }
+
+    BN_ULONG carry = 0;
+    for (int i = bn->top - 1; i >= 0; --i) {
+        // Take the current digit and the previous carry to create a composite
+        BN_ULONG composite = (carry << (BN_ULONG_NUM_BITS - 1)) | (bn->d[i] >> 1);
+        carry = bn->d[i] & 1; // Save the LSB before shifting as the next carry
+        bn->d[i] = composite;
+    }
+
+    // If the most significant digit is now zero, update the `top` counter
+    if (bn->top > 0 && bn->d[bn->top - 1] == 0) {
+        bn->top--;
+    }
+}
+
+// Helper function to get the index of the MSB within a single word
+__device__ int get_msb_index(BN_ULONG word) {
+    // This is a simple example using a linear scan; this can be made more efficient, for example,
+    // by using the built-in __clz() or similar instructions specific to your architecture.
+    for (int i = BN_ULONG_NUM_BITS - 1; i >= 0; --i) {
+        if ((word >> i) & 1) {
+            return i;
+        }
+    }
+    return -1;  // if the word is zero, return -1 or another error indicator
+}
+
+__device__ int bn_get_top_bit(BIGNUM *bn) {
+    // Start scanning from the most significant word
+    for (int i = bn->top - 1; i >= 0; --i) {
+        int msb_index = get_msb_index(bn->d[i]);
+        if (msb_index != -1) {  // If a bit is set in this word
+            //return i * WORD_BITS + msb_index;  // Return the global index of the MSB
+            return i * BN_ULONG_NUM_BITS + msb_index;  // Return the global index of the MSB
+        }
+    }
+    // If no bit is set in any word, this represents the number zero, and there is no MSB.
+    return -1;  // The number is zero, so return -1 or another error indicator
+}
+
+__device__ int bn_get_top_bit_word(BN_ULONG word) {
+    if (word == 0) return -1; // Special case if the word is zero
+    
+    // Find the most significant bit (MSB) set
+    int bit_index = 0;
+    for (int i = BN_ULONG_NUM_BITS - 1; i >= 0; --i) {
+        if (word & ((BN_ULONG)1 << i)) {
+            bit_index = i;
+            break;
+        }
+    }
+    return bit_index;
+}
+
+__device__ void bn_rshift(BIGNUM *result, BIGNUM *a, int shift) {
+    // Assuming a function init_rshift_for_shift should be there similar to bn_init_for_shift.
+    bn_init_for_shift(result, a, -shift);
+
+    if (shift <= 0) {
+        bn_copy(result, a);
+        return;
+    }
+
+    // Initialize result BIGNUM according to your BIGNUM structure definition
+    // Ensure that result->d has enough space to hold the result
+
+    BN_ULONG carry = 0;
+    int word_shift = shift / BN_ULONG_NUM_BITS;
+    int bit_shift = shift % BN_ULONG_NUM_BITS;
+
+    // Perform the bit shift for each word from the most significant downwards.
+    for (int i = a->top - 1; i >= 0; --i) {
+        BN_ULONG new_carry = a->d[i] << (BN_ULONG_NUM_BITS - bit_shift); // Capture the shifted-in bits
+        result->d[i - word_shift] = (a->d[i] >> bit_shift) | carry; // Shift and add carry
+        carry = new_carry; // Update carry for the next iteration
+    }
+
+    // Note: Negative indexing into result->d array should be handled, i.e., don't attempt to write
+    // to indices less than zero. This also includes updating result->top appropriately.
+
+    // Update top according to the number of shifted-out words
+    result->top = a->top - word_shift;
+    if (bit_shift > 0 && a->top > 0 && result->d[a->top - 1] == 0) {
+        result->top--;
+    }
+
+    // Initialize remaining higher-order words to zero
+    for (int i = result->top; i < MAX_BIGNUM_SIZE; ++i) {
+        result->d[i] = 0;
+    }
+}
+
+__device__ BN_ULONG bn_mul_words(BN_ULONG* result, BN_ULONG* a, BN_ULONG q, int n) {
+    BN_ULONG carry = 0;
+    for (int i = 0; i < n; i++) {
+        // Unsigned long multiplication and addition
+        // Note that we're using a 128-bit type to capture the full product
+        unsigned __int128 full_product = (unsigned __int128)a[i] * (unsigned __int128)q + carry;
+        carry = full_product >> BN_ULONG_NUM_BITS; // extract the higher part as carry
+        result[i] = (BN_ULONG)full_product; // keep the lower part in the result
+    }
+    return carry; // The last carry may need to be added to the subtraction part
+}
+
+__device__ BN_ULONG bn_mul_sub_words(BIGNUM *r, BIGNUM *a, int n, BN_ULONG q) {
+    // Assuming result has enough space
+    BN_ULONG temp[MAX_BIGNUM_SIZE];
+    // Initialize temp array to 0
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) temp[i] = 0;
+    
+    // First, multiply a by q, store in temp
+    BN_ULONG carry = bn_mul_words(temp, a->d, q, a->top);
+
+    // Store the carry if required
+    temp[a->top] = carry;
+
+    // Now shift temp to the left by n words
+    for (int i = MAX_BIGNUM_SIZE - 1; i >= n; i--) {
+        temp[i] = temp[i - n];
+    }
+    for (int i = 0; i < n; i++) {
+        temp[i] = 0; // Fill shifted in words with 0
+    }
+
+    // Finally, subtract temp from r using bn_sub_words and return the borrow
+    return bn_sub_words(r->d, r->d, temp, r->top); // Note: r->top should be adjusted considering the n shift
+}
+
+__device__ void convert_word_to_binary(BN_ULONG word, int bits[]) {
+  for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+    bits[i] = (word >> i) & 1;
+  }
+}
+
+__device__ BN_ULONG convert_binary_to_word(int bits[]) {
+  BN_ULONG word = 0;
+  for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+    word <<= 1;
+    word |= bits[i];
+  }
+  return word;
+}
+
+__device__ int compare_bits(int a_bits[], int b_bits[], int n) {
+  for(int i = n-1; i >= 0; --i) {
+    if (a_bits[i] < b_bits[i]) {
+      return -1;
+    } else if (a_bits[i] > b_bits[i]) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+__device__ void subtract_bits(int a_bits[], int b_bits[], int n) {
+  int borrow = 0;
+  for(int i = 0; i < n; ++i) {
+    a_bits[i] -= b_bits[i] + borrow;
+    if (a_bits[i] < 0) {
+      a_bits[i] += 2;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+  }
+}
+
+__device__ void convert_to_binary_array(BN_ULONG value[], int binary[], int words) {
+    for (int word = words - 1; word >= 0; --word) {
+        for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+            binary[(words - 1 - word) * BN_ULONG_NUM_BITS + i] = (value[word] >> (BN_ULONG_NUM_BITS - 1 - i)) & 1;
+        }
+    }
+}
+
+__device__ void convert_back_to_bn_ulong(int binary[], BN_ULONG value[], int words) {
+    for (int word = 0; word < words; ++word) {
+        value[word] = 0;
+        for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+            value[word] |= ((BN_ULONG)binary[word * BN_ULONG_NUM_BITS + (BN_ULONG_NUM_BITS - 1 - i)] << i);
+        }
+    }
+}
+
+__device__ void convert_back_to_bn_ulong_reversed(int binary[], BN_ULONG value[], int words) {
+    for (int word = 0; word < words; ++word) {
+        value[words - 1 - word] = 0;
+        for (int i = 0; i < BN_ULONG_NUM_BITS; ++i) {
+            value[words - 1 - word] |= ((BN_ULONG)binary[word * BN_ULONG_NUM_BITS + (BN_ULONG_NUM_BITS - 1 - i)] << i);
+        }
+    }
+}
+
+__device__ void binary_print_big_endian(const char* msg, int binary[], int total_bits) {
+    printf("\n%s: \n", msg);
+    for (int i = 0; i < total_bits; i++) {
+        printf("%d", binary[i]);
+        if ((i + 1) % BN_ULONG_NUM_BITS == 0) {
+            printf("\n");
+        }
+    }
+    printf("\n");
+}
+
+__device__ void reverse_chunks(int arr[], int total_bits, int chunk_size) {
+    int num_chunks = total_bits / chunk_size;
+    for (int i = 0; i < num_chunks / 2; ++i) {
+        int start1 = i * chunk_size;
+        int start2 = (num_chunks - i - 1) * chunk_size;
+        // Swap the chunks
+        for (int j = 0; j < chunk_size; ++j) {
+            int temp = arr[start1 + j];
+            arr[start1 + j] = arr[start2 + j];
+            arr[start2 + j] = temp;
+        }
+    }
+}
+
+__device__ void bn_print_quotient(const char* msg, BIGNUM* a) {
+    printf("%s", msg);
+    if (a->top == 0) {
+        printf("0\n");
+        return;
+    }
+    if (a->neg) {
+        printf("-");
+    }
+    int i = a->top - 1;
+    printf("%llx", a->d[i]);
+    for (i = a->top - 2; i >= 0; i--) {
+        printf("%016llx", a->d[i]);
+    }
+    printf("\n");
+}
+
+__device__ int binary_compare(const int *binary1, const int *binary2, int num_bits) {
+    for (int i = num_bits - 1; i >= 0; --i) {
+        if (binary1[i] > binary2[i]) {
+            // binary1 is greater than binary2
+            return 1;
+        } else if (binary1[i] < binary2[i]) {
+            // binary1 is less than binary2
+            return -1;
+        }
+        // If binary1[i] equals binary2[i], continue checking the next bit
+    }
+    // binary1 and binary2 are equal
+    return 0;
+}
+
+// Helper function to determine the 'top' field value for a BIGNUM from a binary array
+__device__ int get_bn_top_from_binary_array(const int binary[], int total_bits) {
+    for (int i = total_bits - 1; i >= 0; --i) {
+        if (binary[i]) {
+            return (i / BN_ULONG_NUM_BITS) + 1;
+        }
+    }
+    return 1; // If every bit is zero, top is one
+}
+
+__device__ int get_bn_top_from_binary_array_little_endian(const int binary[], int total_bits) {
+    int last_non_zero_index = -1; // This will store the last index where binary[i] is non-zero
+    for (int i = 0; i < total_bits; ++i) {
+        if (binary[i]) {
+            last_non_zero_index = i;
+        }
+    }
+    if (last_non_zero_index == -1) {
+        return 1; // If every bit is zero, top is one
+    } else {
+        return (last_non_zero_index / BN_ULONG_NUM_BITS) + 1;
+    }
+}
+
+__device__ void bn_div_binary(
+    int dividend[],
+    int divisor[],
+    int quotient[],
+    int remainder[],
+    int dividend_words,
+    int divisor_words
+) {
+    // Declare variable to store clock() value
+    clock_t start, end;
+    // Start the clock
+    start = clock64();
+
+    const int total_bits = MAX_BIGNUM_SIZE * BN_ULONG_NUM_BITS;
+    int temp[total_bits];
+    memset(temp, 0, sizeof(temp));
+
+    for (int i = 0; i < total_bits; ++i) {
+        // Shift temp left by 1
+        for (int j = 0; j < total_bits - 1; ++j) {
+            temp[j] = temp[j+1];
+        }
+        temp[total_bits - 1] = dividend[i];
+
+        // Check if temp is greater than or equal to divisor
+        int can_subtract = 1;
+        for (int j = 0; j < total_bits; ++j) {
+            if (temp[j] != divisor[j]) {
+                can_subtract = temp[j] > divisor[j];
+                break;
+            }
+        }
+        // Subtract divisor from temp if temp >= divisor
+        if(can_subtract) {
+            quotient[i] = 1;
+            for (int j = total_bits - 1; j >= 0; --j) {
+                temp[j] -= divisor[j];
+                if (temp[j] < 0) {  // Borrow from the next bit if needed
+                    temp[j] += 2;
+                    temp[j-1] -= 1;
+                }
+            }
+        } else {
+            quotient[i] = 0;
+        }
+    }
+
+    // Remainder is in temp after division
+    memcpy(remainder, temp, total_bits * sizeof(int));
+
+    // End the clock
+    end = clock64();
+    // Calculate the elapsed time
+    elapsed_time_bn_div_binary += (double)(end - start);
+}
+
+__device__ void left_shift(BIGNUM *a, int shift) {
+    clock_t start = clock64();
+    if (shift == 0) return;  // No shift needed
+
+    int word_shift = shift / BN_ULONG_NUM_BITS;
+    int bit_shift = shift % BN_ULONG_NUM_BITS;
+
+    // Shift whole words
+    if (word_shift > 0) {
+        for (int i = MAX_BIGNUM_SIZE - 1; i >= word_shift; i--) {
+            a->d[i] = a->d[i - word_shift];
+        }
+        for (int i = 0; i < word_shift; i++) {
+            a->d[i] = 0;
+        }
+    }
+
+    // Shift remaining bits
+    if (bit_shift > 0) {
+        BN_ULONG carry = 0;
+        for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+            BN_ULONG new_carry = a->d[i] >> (BN_ULONG_NUM_BITS - bit_shift);
+            a->d[i] = (a->d[i] << bit_shift) | carry;
+            carry = new_carry;
+        }
+    }
+
+    // Calculate new top
+    unsigned char potential_new_top = a->top + (shift + BN_ULONG_NUM_BITS - 1) / BN_ULONG_NUM_BITS;
+    a->top = find_top_optimized(a, potential_new_top);
+
+    record_function(FN_LEFT_SHIFT, start);
+}
+
+// Function to search for a B value in the cache
+__device__ int find_in_cache(BN_ULONG B, BN_ULONG B_values[], int cache_count) {
+    // init start timer
+    // We may know the place of B in the cache. TODO: Implement a better search algorithm
+    clock_t start = clock64();
+    for (int i = 0; i < cache_count; i++) {
+        if (B_values[i] == B) {
+            record_function(FN_FIND_IN_CACHE, start);
+            return i;
+        }
+    }
+    record_function(FN_FIND_IN_CACHE, start);
+    return -1;
+}
+
+__device__ int bn_div(BIGNUM *bn_quotient, BIGNUM *bn_remainder, BIGNUM *bn_dividend, BIGNUM *bn_divisor)
+{
+    clock_t start = clock64();
+
+    // Store signs and work with absolute values
+    int dividend_neg = bn_dividend->neg;
+    int divisor_neg = bn_divisor->neg;
+    BIGNUM abs_dividend, abs_divisor;
+    init_zero(&abs_dividend);
+    init_zero(&abs_divisor);
+
+    unsigned char divs_max_top = (bn_dividend->top > bn_divisor->top) ? bn_dividend->top : bn_divisor->top;
+
+    // Copy absolute values
+    for (int i = 0; i < divs_max_top; i++) {
+        abs_dividend.d[i] = bn_dividend->d[i];
+        abs_divisor.d[i] = bn_divisor->d[i];
+    }
+    abs_dividend.neg = 0;
+    abs_divisor.neg = 0;
+    abs_dividend.top = bn_dividend->top;
+    abs_divisor.top = bn_divisor->top;
+
+    // Initialize quotient and remainder
+    init_zero(bn_quotient);
+    init_zero(bn_remainder);
+
+    // Handle special cases
+    if (bn_cmp(&abs_dividend, &abs_divisor) == 0) {
+        bn_quotient->d[0] = 1;
+        bn_quotient->top = 1;
+        bn_quotient->neg = (dividend_neg != divisor_neg);
+        printf("abs_dividend == abs_divisor. Quotient = 1\n");
+        record_function(FN_BN_DIV, start);
+        return 1;
+    }
+    // Perform long division
+    BIGNUM current_dividend;
+    init_zero(&current_dividend);
+    char dividend_size = abs_dividend.top;
+
+    #if bn_mul_caching
+        // Initialize cache arrays
+        BN_ULONG B_values[MAX_CACHE_SIZE];
+        BIGNUM products[MAX_CACHE_SIZE];
+        int cache_count = 0;
+    #endif
+
+    for (int i = dividend_size - 1; i >= 0; i--) {
+        // Shift current_dividend left by one word and add next word of dividend
+        left_shift(&current_dividend, 64);
+        current_dividend.d[0] = abs_dividend.d[i];
+
+        // Find quotient digit
+        BN_ULONG q = 0;
+        BN_ULONG left = 0, right = UINT64_MAX;
+        while (left <= right) {
+            BN_ULONG mid = left + (right - left) / 2;
+            BIGNUM temp, product;
+            init_zero(&temp);
+            init_zero(&product);
+            temp.d[0] = mid;
+            temp.top = 1;
+
+            // 
+            #if bn_mul_caching
+                int cache_index = find_in_cache(mid, B_values, cache_count);
+                if (cache_index != -1) {
+                    product = products[cache_index];
+                } else {
+                    bn_mul(&abs_divisor, &temp, &product);
+                    if (cache_count < MAX_CACHE_SIZE) {
+                        B_values[cache_count] = mid;
+                        products[cache_count] = product;
+                        cache_count++;
+                    }
+                    else {
+                        printf("[0] Cache miss. %016llx is more than %d\n", mid, MAX_CACHE_SIZE);
+                    }
+                }
+            #else
+                bn_mul(&abs_divisor, &temp, &product);
+            #endif
+
+            if (bn_cmp(&product, &current_dividend) <= 0) {
+                q = mid;
+                left = mid + 1;
+            } else {
+                right = mid - 1;
+            }
+        }
+
+        // Add quotient digit to result
+        left_shift(bn_quotient, 64);
+        bn_quotient->d[0] |= q;
+
+        // Subtract q * divisor from current_dividend
+        BIGNUM temp, product;
+        init_zero(&temp);
+        init_zero(&product);
+        temp.d[0] = q;
+        temp.top = 1;
+
+        #if bn_mul_caching
+            int cache_index = find_in_cache(q, B_values, cache_count); // Shell runtime: 362.258584028 seconds
+            if (cache_index != -1) {
+                product = products[cache_index];
+            } else {
+                bn_mul(&abs_divisor, &temp, &product);
+                if (cache_count < MAX_CACHE_SIZE) {
+                    B_values[cache_count] = q;
+                    products[cache_count] = product;
+                    cache_count++;
+                }
+                else {
+                    printf("[1] Cache miss. %016llx is more than %d\n", q, MAX_CACHE_SIZE);
+                }
+            }
+        #else
+            bn_mul(&abs_divisor, &temp, &product);
+        #endif
+
+        bn_subtract(&current_dividend, &current_dividend, &product);
+    }
+
+    // Set remainder
+    // for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+    for (int i = 0; i < current_dividend.top; i++) {
+        bn_remainder->d[i] = current_dividend.d[i];
+    }
+
+    // Apply correct signs
+    bn_quotient->neg = (dividend_neg != divisor_neg);
+    bn_remainder->neg = dividend_neg;
+
+    // Normalize results
+    bn_quotient->top = find_top_optimized(bn_quotient, divs_max_top);
+    bn_remainder->top = find_top_optimized(bn_remainder, divs_max_top);
+
+    record_function(FN_BN_DIV, start);
+    return 1;
+}
+
+__device__ void bn_abs(BIGNUM *result, BIGNUM *a) {
+    // Assuming the BIGNUM structure includes an attribute to indicate the sign (e.g., 'sign')
+    // Copy the number from a to result
+    // In actual code, this would likely need to loop over each digit and copy them.
+    for (int i = 0; i < a->top; ++i) {
+        result->d[i] = a->d[i];
+    }
+    // Ensure result uses the same number of digits as 'a'
+    result->top = a->top;
+
+    // Set the sign of the result to be non-negative (0 for positive in many conventions)
+    result->neg = 0;
+}
+
+__device__ void bn_set_signed_word(BIGNUM *r, int64_t value) {
+    // Clear any existing value in r.
+    // Assuming MAX_BIGNUM_SIZE is defined and represents the maximum size of d[].
+    for (int i = 0; i < MAX_BIGNUM_SIZE; ++i) {
+        r->d[i] = 0;
+    }
+
+    // Set the sign in r. Assuming the sign is represented by a simple integer where
+    // negative numbers have sign = -1 and non-negatives have sign = 0.
+    r->neg = (value < 0) ? -1 : 0;
+
+    // Store the absolute value of the word in the least significant part of r.
+    // Assuming the magnitude can fit in a single 'word' of the BIGNUM data structure.
+    // Depending on how BIGNUM is structured, you might need to handle cases where
+    // the magnitude of the integer does not fit into a single array element.
+    r->d[0] = (value < 0) ? -value : value;
+
+    // Set 'top' to reflect that we're now using the least significant word only.
+    // Assuming 'top' is an index of the highest non-zero element.
+    r->top = (value != 0) ? 1 : 0;
+}
+
+__device__ void bn_swap(BIGNUM *a, BIGNUM *b) {
+    // Swap the dynamic parts
+    BN_ULONG temp_d[MAX_BIGNUM_SIZE];
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+        temp_d[i] = a->d[i];
+    }
+    //a->d = b->d;
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+        a->d[i] = b->d[i];
+    }
+    //b->d = temp_d;
+    for (int i = 0; i < MAX_BIGNUM_SIZE; i++) {
+        b->d[i] = temp_d[i];
+    }
+    
+    // Swap the scalar components such as top, sign etc.
+    int temp_top = a->top;
+    a->top = b->top;
+    b->top = temp_top;
+
+    int temp_sign = a->neg;
+    a->neg = b-> neg;
+    b->neg = temp_sign;
+}
+
+__device__ int is_even(const BIGNUM* num) {
+    // Considering that the least significant part of the number
+    // is stored at the start of the array.
+    // And assuming that your BIGNUM structure uses an array of integers
+    // to represent the number, named `d` for the data.
+    
+    // Check the least significant bit of the least significant part.
+    // num->d[0] represents the least significant part of the BIGNUM.
+    // If the LSB is 0, it means the number is even.
+    if (num->d[0] & 1) {
+        return 0; // Odd number
+    } else {
+        return 1; // Even number
+    }
+}
+
+__device__ void bn_gcd(BIGNUM* r, BIGNUM* in_a, BIGNUM* in_b) {
+    printf("++ bn_gcd ++\n");
+    bn_print(">> in_a: ", in_a);
+    bn_print(">> in_b: ", in_b);
+    BIGNUM a, b, temp;
+    int shifts = 0;
+
+    // Initialize BIGNUM variables
+    init_zero(&a);
+    init_zero(&b);
+    init_zero(&temp);
+
+    // Copy in_a and in_b to a and b respectively because we need to modify them
+    bn_copy(&a, in_a);
+    bn_copy(&b, in_b);
+
+    // Check if a and b are equal
+    if (bn_cmp(&a, &b) == 0) {
+        bn_copy(r, &a); // Set the result to a (or b, since they are equal)
+        return; // Exit the function early
+    }
+
+    // Check if either a or b is zero at the start and set r accordingly
+    if (bn_is_zero(&a)) {
+        // Since a is zero, GCD(a, b) = b by definition
+        bn_copy(r, &b);
+        return; // Exit the function early
+    }
+    if (bn_is_zero(&b)) {
+        // Since b is zero, GCD(a, b) = a by definition
+        bn_copy(r, &a);
+        return; // Exit the function early
+    }
+
+    // Step 1: remove common factors of 2 from a and b
+    while (is_even(&a) && is_even(&b)) {
+        bn_rshift_one(&a); // equivalent to a /= 2;
+        bn_rshift_one(&b); // equivalent to b /= 2;
+        shifts++;
+    }
+
+    // Make sure a is odd
+    while (is_even(&a)) {
+        bn_rshift_one(&a);
+    }
+
+    do {
+        // Remove factors of 2 from b, as b will eventually become the GCD
+        while (is_even(&b)) {
+            bn_rshift_one(&b);
+        }
+
+        // Swap if necessary to ensure that a <= b
+        if (bn_cmp(&a, &b) > 0) {
+            // Swap a and b
+            bn_swap(&a, &b);
+        }
+
+        bn_subtract(&b, &b, &a); // b = b - a
+    } while (!bn_is_zero(&b));
+
+    // Step 3: adjust the result to include the factors of 2 we removed earlier
+    BIGNUM temp_a;
+    init_zero(&temp_a);
+    bn_lshift_res(&temp_a, &a, shifts); // equivalent to a *= 2^shifts;
+
+    // Copy the result to r
+    bn_copy(r, &temp_a);
+
+    bn_print("<< bn_gcd r: ", r);
+    printf("-- bn_gcd --\n");
+}
+
+__device__ void swap_bignum_pointers(BIGNUM** a, BIGNUM** b) {
+    BIGNUM* temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+__device__ void bn_gcdext(BIGNUM *g, BIGNUM *s, BIGNUM *t, BIGNUM *a, BIGNUM *b) {
+    printf("\n++ bn_gcdext ++\n");
+    printf("\n");
+    BIGNUM old_s, old_t, old_r, r, quotient, temp;
+    init_zero(&old_s);
+    init_zero(&old_t);
+    init_zero(&old_r);
+    init_zero(&r);
+    init_zero(&quotient);
+    init_zero(&temp);
+
+    bn_copy(&old_r, b);
+    bn_copy(&r, a);
+    bn_set_word(&old_s, 0);
+    bn_set_word(s, 1);
+    bn_set_word(&old_t, 1);
+    bn_set_word(t, 0);
+
+    while (!bn_is_zero(&r)) {
+        bn_div(&quotient, &temp, &old_r, &r);
+        bn_copy(&old_r, &r);
+        bn_copy(&r, &temp);
+        bn_mul(&temp, &quotient, s);
+        bn_subtract(&temp, &old_s, &temp);
+        bn_copy(&old_s, s);
+        bn_copy(s, &temp);
+        bn_mul(&temp, &quotient, t);
+        bn_subtract(&temp, &old_t, &temp);
+        bn_copy(&old_t, t);
+        bn_copy(t, &temp);
+    }
+
+    // Use bn_gcd to calculate the GCD
+    bn_gcd(g, a, b);
+    
+    // Adjust the signs of s and t based on the input values
+    if (bn_is_negative(a)) {
+        old_s.neg = !old_s.neg;
+    }
+    if (bn_is_negative(b)) {
+        old_t.neg = !old_t.neg;
+    }
+
+    bn_copy(s, &old_s);
+    bn_copy(t, &old_t);
+
+    bn_print("\n<< g: ", g);
+    bn_print("<< s: ", s);
+    bn_print("<< t: ", t);
+    printf("-- bn_gcdext --\n");
+}
+
+__device__ bool bn_mod_inverse(BIGNUM *result, BIGNUM *a, BIGNUM *n) {
+    clock_t start, end;
+    // Start the clock
+    start = clock64();
+    bool debug = 0;
+    if (bn_is_one(n)) {
+        return false;  // No modular inverse exists
+    }
+
+    BIGNUM r;
+    BIGNUM nr;
+    BIGNUM t;
+    BIGNUM nt;
+    BIGNUM q;
+    BIGNUM tmp;
+    BIGNUM tmp2;
+    BIGNUM tmp3;
+
+    init_zero(&r);
+    init_zero(&nr);
+    init_zero(&t);
+    init_one(&nt);
+    init_zero(&q);
+    init_zero(&tmp);
+    init_zero(&tmp2);
+    init_zero(&tmp3);
+
+    bn_copy(&r, n);
+    bn_mod(&nr, a, n); // Compute non-negative remainder of 'a' modulo 'n'
+    unsigned int counter = 0;
+    while (!bn_is_zero(&nr)) {
+        bn_div(&q, &tmp, &r, &nr); // Compute quotient and remainder
+        bn_copy(&tmp, &nt);
+        bn_mul(&q, &nt, &tmp2); // tmp2 = q * nt
+        init_zero(&tmp3);
+        bn_subtract(&tmp3, &t, &tmp2); // tmp3 = t - tmp2
+        bn_copy(&nt, &tmp3); // dst << src
+        bn_copy(&t, &tmp);
+        bn_copy(&tmp, &nr);
+        bn_mul(&q, &nr, &tmp2);
+        init_zero(&tmp3);
+        bn_subtract(&tmp3, &r, &tmp2); // tmp3 = r - tmp2
+        bn_copy(&nr, &tmp3);
+        bn_copy(&r, &tmp);
+        if (debug) counter++;
+    }
+
+    if (!bn_is_one(&r)) {
+        init_zero(result);
+        delete &r;
+        delete &nr;
+        delete &t;
+        delete &nt;
+        delete &q;
+        delete &tmp;
+        delete &tmp2;
+        return false; // No modular inverse exists
+    }
+
+    if (bn_is_negative(&t)) {
+        bn_add(&tmp2, &t, n); // tmp2 = t + n
+        bn_copy(&t, &tmp2);
+    }
+
+    bn_copy(result, &t);
+
+    delete &r;
+    delete &nr;
+    delete &t;
+    delete &nt;
+    delete &q;
+    delete &tmp;
+    delete &tmp2;
+    // Stop the clock
+    end = clock64();
+    elapsed_time_bn_mod_inverse += (double)(end - start);
+    return true;
+}
+
+__device__ void bn_to_hex_str(BIGNUM *bn, char *str) {
+    int i, j, v;
+    char hex_chars[] = "0123456789ABCDEF";
+    j = 0;
+
+    for (i = bn->top - 1; i >= 0; i--) {
+        for (int shift = BN_ULONG_NUM_BITS - 4; shift >= 0; shift -= 4) {
+            v = (bn->d[i] >> shift) & 0xf;
+            if (v || j > 0 || i == 0) {
+                str[j++] = hex_chars[v];
+            }
+        }
+    }
+    str[j] = '\0';
+}
+
+__device__ size_t dev_strlen(const char *str) {
+    size_t len = 0;
+    while (str[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+__device__ void bignum_to_bit_array(BIGNUM *n, unsigned int *bits) {
+    int index = 0;
+    
+    // Iterate through the words in reverse order
+    for (int i = 0; i < n->top; ++i) {
+        BN_ULONG word = n->d[i];
+        // For each word, iterate through bits from most significant to least significant
+        for (int j = 0; j < BN_ULONG_NUM_BITS; ++j) {
+            bits[index++] = (word >> j) & 1;
+        }
+    }
+
+    // If n->top < 4, fill the remaining bits with zeros
+    while (index < 256) {
+        bits[index++] = 0;
+    }
+}
+
+__device__ void reverse_order(BIGNUM *test_values_a, const unsigned char words_count) {
+    for (size_t j = 0; j < words_count / 2; j++) {
+        BN_ULONG temp_a = test_values_a->d[j];
+        test_values_a->d[j] = test_values_a->d[words_count - 1 - j];
+        test_values_a->d[words_count - 1 - j] = temp_a;
+    }
+}
+
+__device__ void bufferToHex(const uint8_t *buffer, char *output) {
+    // Init output
+    for (size_t i = 0; i < PUBLIC_KEY_SIZE * 2 + 1; i++) {
+        output[i] = '\0';
+        if (i > 66) {
+            printf("Error: bufferToHex output buffer overflow\n");
+        }
+    }
+    const char hex_chars[] = "0123456789abcdef";
+    for (size_t i = 0; i < PUBLIC_KEY_SIZE; i++) {
+        output[i * 2] = hex_chars[buffer[i] >> 4];
+        output[i * 2 + 1] = hex_chars[buffer[i] & 0xF];
+    }
+    output[PUBLIC_KEY_SIZE * 2] = '\0';
+}
+```
+
+# main.cu
+```
+#include <cuda_runtime.h>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+#include <stdio.h>
+#include <cuda.h>
+#include "bignum.h"
+#define MAX_PASSPHRASE_LENGTH 5 // "book" test word + null terminator. DON'T FORGET TO INCREASE
+#include "p_chain.h"
+#include "nlohmann/json.hpp"
+#include <cstring>
+#include <string.h>
+#include <limits.h>
+#include <nvtx3/nvToolsExt.h>
+
+#define P_CHAIN_ADDRESS_LENGTH 45  // Assuming the p-chain address is 45 characters long
+
+__device__ bool d_address_found = false;
+__device__ char d_address_value[P_CHAIN_ADDRESS_LENGTH + 1];
+__device__ char d_passphrase_value[MAX_PASSPHRASE_LENGTH];
+
+#define OVERFLOW_FLAG ULLONG_MAX
+
+struct ThreadTiming {
+    int blockIdx;
+    int threadIdx;
+    long long startTime;
+    long long endTime;
+};
+
+unsigned long long find_variant_id(const char* s) {
+    const char* alphabet = "abcdefghijklmnopqrstuvwxyz";
+    int base = strlen(alphabet);
+    unsigned long long result = 0;
+    unsigned long long prev_result = 0;
+    
+    for (int i = 0; s[i] != '\0'; i++) {
+        const char* pos = strchr(alphabet, s[i]);
+        if (pos != NULL) {
+            int index = pos - alphabet;
+            
+            // Check for multiplication overflow
+            if (result > ULLONG_MAX / base) {
+                return OVERFLOW_FLAG;
+            }
+            result *= base;
+            
+            // Check for addition overflow
+            if (result > ULLONG_MAX - (index + 1)) {
+                return OVERFLOW_FLAG;
+            }
+            result += index + 1;
+            
+            // Check if the value wrapped around
+            if (result < prev_result) {
+                return OVERFLOW_FLAG;
+            }
+            
+            prev_result = result;
+        }
+    }
+    
+    return result;
+}
+
+// __device__ __forceinline__ void find_letter_variant(int variant_id, char* passphrase_value) {
+__device__ void find_letter_variant(int variant_id, char* passphrase_value) {
+    // Define alphabet as a constant array
+    const char alphabet[] = "abcdefghijklmnopqrstuvwxyz";
+    const int alphabet_length = 26;
+
+    // Initialize first character to null terminator, rest will be filled as needed
+    passphrase_value[0] = '\0';
+
+    // Handle the special case for variant_id == 0
+    if (variant_id == 0) {
+        passphrase_value[0] = alphabet[0];
+        passphrase_value[1] = '\0';
+        return;
+    }
+
+    int result_length = 0;
+    
+    // Generate the passphrase
+    while (variant_id > 0 && result_length < MAX_PASSPHRASE_LENGTH - 1) {  // Leave room for null terminator
+        --variant_id;  // Adjust for 0-based indexing
+        passphrase_value[result_length++] = alphabet[variant_id % alphabet_length];
+        variant_id /= alphabet_length;
+    }
+    passphrase_value[result_length] = '\0';  // Ensure null termination
+
+    // Reverse the result in-place
+    int start = 0;
+    int end = result_length - 1;
+    while (start < end) {
+        char temp = passphrase_value[start];
+        passphrase_value[start] = passphrase_value[end];
+        passphrase_value[end] = temp;
+        ++start;
+        --end;
+    }
+}
+
+__device__ int my_strncmp(const char* s1, const char* s2, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (s1[i] != s2[i]) {
+            return s1[i] - s2[i];
+        }
+        if (s1[i] == '\0') {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+__global__ void variant_kernel(
+    unsigned long long start_variant_id,
+    unsigned long long end_variant_id, 
+    const char *expected_value, 
+    const char *mnemonic,
+    ThreadTiming *timings
+) {
+    int blockId = blockIdx.x;
+    int threadId = threadIdx.x;
+    int globalIdx = blockId * blockDim.x + threadId;
+    unsigned long long variant_id = start_variant_id + globalIdx;
+    
+    // Record start time
+    long long start_time = clock64();
+    timings[globalIdx].blockIdx = blockId;
+    timings[globalIdx].threadIdx = threadId;
+    timings[globalIdx].startTime = start_time;
+    
+    while (variant_id <= end_variant_id && !d_address_found) {
+        char local_passphrase_value[MAX_PASSPHRASE_LENGTH] = {0};
+        find_letter_variant(variant_id, local_passphrase_value);
+        
+        // Calculate p-chain address
+        P_CHAIN_ADDRESS_STRUCT p_chain_address = restore_p_chain_address((uint8_t*)mnemonic, local_passphrase_value);
+        
+         if (my_strncmp(p_chain_address.data, expected_value, P_CHAIN_ADDRESS_LENGTH+1) == 0) {
+            d_address_found = true;
+            for (int i = 0; i < P_CHAIN_ADDRESS_LENGTH; i++) {
+                d_address_value[i] = p_chain_address.data[i];
+            }
+            // Set the passphrase value
+            for (int i = 0; i < MAX_PASSPHRASE_LENGTH; i++) {
+                d_passphrase_value[i] = local_passphrase_value[i];
+            }
+            d_address_value[P_CHAIN_ADDRESS_LENGTH] = '\0';
+        }
+        // Early exit if address is found
+        if (d_address_found) break;
+        
+        variant_id += gridDim.x * blockDim.x;
+    }
+    
+    // Record end time
+    long long end_time = clock64();
+    timings[globalIdx].endTime = end_time;
+}
+
+void write_timing_to_csv(const char* filename, ThreadTiming* timings, int num_threads) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error opening file: " << filename << std::endl;
+        return;
+    }
+    
+    file << "BlockIdx,ThreadIdx,StartTime,EndTime,Duration" << std::endl;
+    
+    for (int i = 0; i < num_threads; i++) {
+        file << timings[i].blockIdx << ","
+             << timings[i].threadIdx << ","
+             << timings[i].startTime << ","
+             << timings[i].endTime << ","
+             << (timings[i].endTime - timings[i].startTime) << std::endl;
+    }
+    
+    file.close();
+    std::cout << "Timing data saved to " << filename << std::endl;
+}
+
+unsigned long long calculate_iterations(unsigned long long start_variant_id, unsigned long long end_variant_id, int h_max_threads) {
+    unsigned long long search_area = end_variant_id - start_variant_id;
+    return (search_area + h_max_threads - 1) / h_max_threads;
+}
+
+int main() {
+    // int threadsPerBlock = 256;
+    int threadsPerBlock = 1;
+    int blocksPerGrid = 1;
+    int totalThreads = threadsPerBlock * blocksPerGrid;
+
+    // Allocate memory for timing data
+    ThreadTiming *h_timings = new ThreadTiming[totalThreads];
+    ThreadTiming *d_timings;
+    cudaMalloc(&d_timings, totalThreads * sizeof(ThreadTiming));
+
+    bool h_address_found = false;
+    char h_address_value[P_CHAIN_ADDRESS_LENGTH + 1];
+    char h_passphrase_value[MAX_PASSPHRASE_LENGTH];
+
+    // Read expected value from JSON file
+    std::ifstream config_file("config.json");
+    if (!config_file.is_open()) {
+        std::cerr << "Failed to open config.json" << std::endl;
+        return -1;
+    }
+    
+    nlohmann::json config;
+    config_file >> config;
+    
+    // std::string expected_value = config["p_chain_address"];
+    std::string expected_value = config["p_chain_address"];
+    std::string mnemonic = config["mnemonic"];
+    std::string start_passphrase = config["start_passphrase"];
+    std::string end_passphrase = config["end_passphrase"];
+
+    if (expected_value.length() != P_CHAIN_ADDRESS_LENGTH) {
+        std::cerr << "Invalid p_chain_address length in config.json" << std::endl;
+        return -1;
+    }
+    if (mnemonic.empty()) {
+        std::cerr << "Mnemonic is empty in config.json" << std::endl;
+        return -1;
+    }
+
+    // Calculate search area
+    unsigned long long start_variant_id = find_variant_id(start_passphrase.c_str());
+    unsigned long long end_variant_id = find_variant_id(end_passphrase.c_str());
+
+    if (start_variant_id == OVERFLOW_FLAG || end_variant_id == OVERFLOW_FLAG) {
+        std::cerr << "Passphrase overflow detected. The maximum passphrase is gkgwbylwrxtlpn" << std::endl;
+        return -1;
+    }
+
+    std::cout << "Start variant id: " << start_variant_id << std::endl;
+    std::cout << "End variant id: " << end_variant_id << std::endl;
+    std::cout << "Search area: " << end_variant_id - start_variant_id + 1 << std::endl;
+
+    char *d_expected_value;
+    cudaMalloc((void**)&d_expected_value, P_CHAIN_ADDRESS_LENGTH + 1);
+    cudaMemcpy(d_expected_value, expected_value.c_str(), P_CHAIN_ADDRESS_LENGTH + 1, cudaMemcpyHostToDevice);
+
+    char *d_mnemonic;
+    cudaMalloc((void**)&d_mnemonic, mnemonic.length() + 1);
+    cudaMemcpy(d_mnemonic, mnemonic.c_str(), mnemonic.length() + 1, cudaMemcpyHostToDevice);
+
+    std::cout << "Launching kernel with " << blocksPerGrid << " blocks and " << threadsPerBlock << " threads per block" << std::endl;
+    
+    // Start NVTX range
+    nvtxRangePush("KernelExecution");
+
+    // Launch kernel
+    variant_kernel<<<blocksPerGrid, threadsPerBlock>>>(
+        start_variant_id, 
+        end_variant_id, 
+        d_expected_value, 
+        d_mnemonic,
+        d_timings
+    );
+
+    // End NVTX range
+    nvtxRangePop();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Error launching kernel: %s\n", cudaGetErrorString(err));
+        cudaDeviceReset();
+        return -1;
+    }
+
+    cudaDeviceSynchronize();
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("Error after synchronization: %s\n", cudaGetErrorString(err));
+        cudaDeviceReset();
+        return -1;
+    }
+
+    // Copy timing data back to host
+    cudaMemcpy(h_timings, d_timings, totalThreads * sizeof(ThreadTiming), cudaMemcpyDeviceToHost);
+
+    // Write timing data to CSV
+    write_timing_to_csv("thread_timing.csv", h_timings, totalThreads);
+
+    // Check if address was found
+    cudaMemcpyFromSymbol(&h_address_found, d_address_found, sizeof(bool));
+    if (h_address_found) {
+        cudaMemcpyFromSymbol(h_address_value, d_address_value, P_CHAIN_ADDRESS_LENGTH + 1);
+        printf("\nAddress found: %s\n", h_address_value);
+        cudaMemcpyFromSymbol(h_passphrase_value, d_passphrase_value, MAX_PASSPHRASE_LENGTH);
+        printf("Passphrase: %s\n", h_passphrase_value);
+
+        // Save results to file
+        std::ofstream result_file("result.txt");
+        if (result_file.is_open()) {
+            result_file << "Address: " << h_address_value << std::endl;
+            result_file << "Passphrase: " << h_passphrase_value << std::endl;
+            result_file.close();
+            std::cout << "Results saved to result.txt" << std::endl;
+        } else {
+            std::cerr << "Unable to open result.txt for writing" << std::endl;
+        }
+    } else {
+        printf("\nAddress not found\n");
+    }
+
+    // Clean up
+    cudaFree(d_expected_value);
+    cudaFree(d_mnemonic);
+    cudaDeviceReset();
+
+    delete[] h_timings;
+    cudaFree(d_timings);
+
+    return 0;
+}
+```
+
+# Task:
+Please, provide a list of functions that already implemented and may be useful for the Karatsuba multiplication approach.
