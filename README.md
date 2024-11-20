@@ -1,0 +1,2 @@
+# ollama
+Local gpu ollama
