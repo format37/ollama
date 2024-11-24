@@ -16,7 +16,8 @@ def chat_with_qwen(message, history):
     # Get response from Ollama
     response = client.chat(
         # model='qwen2.5-coder:7b-instruct',
-        model = "llama3.2",
+        model='qwen2.5-coder:32b',
+        # model = "llama3.2",
         messages=messages,
         stream=False
     )
@@ -26,7 +27,7 @@ def chat_with_qwen(message, history):
 # Create Gradio interface
 demo = gr.ChatInterface(
     fn=chat_with_qwen,
-    title="Qwen 2.5 Coder Assistant",
+    title="NLP assistant",
     description="Chat with Qwen 2.5 Coder model for programming help",
     examples=["Write a Python function to sort a list",
              "Explain how async/await works in JavaScript",
