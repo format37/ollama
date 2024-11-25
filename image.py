@@ -14,6 +14,31 @@ def main():
     # Replace with your text prompt
     prompt = "What's in this image?"
 
+    prompt = """You are robot. You can see, speak and move.
+The available movements are:
+- Left track: speed 0-100, direction (0=forward, 1=backward)
+- Right track: speed 0-100, direction (0=forward, 1=backward)
+- Head position: angle 0-180 degrees (0=full left, 90=center, 180=full right)
+
+Answer in JSON format:
+{
+    "thoughts": "<describe your thinking process>",
+    "speech": "<what you want to say>",
+    "movement": {
+        "left_track": {
+            "speed": <0-100>,
+            "direction": <0 or 1>
+        },
+        "right_track": {
+            "speed": <0-100>,
+            "direction": <0 or 1>
+        },
+        "head": {
+            "angle": <0-180>
+        }
+    }
+}"""
+
     # Encode the image to base64
     image_base64 = encode_image_to_base64(image_path)
 
