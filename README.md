@@ -47,3 +47,20 @@ Access the chat interface at `http://localhost:7860`
 ## Models
 A list of available models is published on the [Ollama website](https://ollama.com/models).
 To use a different model, modify the `ollama_run.sh` script.
+
+## Docker
+[Official docker image](https://hub.docker.com/r/ollama/ollama)
+```
+docker run -d --gpus '"device=0"' -e OLLAMA_FLASH_ATTENTION=1 -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
+```
+Run a model. Replace `qwen2.5:32b` with the model you want to use.
+```
+docker exec -it ollama ollama run qwen2.5:32b
+```
+
+## Issues
+Error starting userland proxy: listen tcp4 0.0.0.0:11434: bind: address already in use.
+```
+sudo lsof -i :11434
+sudo kill -9 <PID>
+```
