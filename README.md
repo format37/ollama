@@ -22,7 +22,7 @@ sh pull_model.sh llava:7b
 
 3. Launch the Gradio interface:
 ```bash
-cd gradio_image
+cd docker
 sh run.sh llava:7b
 ```
 
@@ -58,7 +58,7 @@ And text models like:
 
 ## Project Structure
 
-- `gradio_image/` - Gradio web interface implementation
+- `docker/` - Gradio web interface implementation
 - `examples/` - Several examples of using Ollama
 - `requirements.txt` - Python dependencies
 
