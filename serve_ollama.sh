@@ -6,6 +6,7 @@ sudo docker rm -f ollama 2>/dev/null
 # Then start the main Ollama service
 sudo docker run \
   --gpus all \
+  --runtime=nvidia \
   --rm \
   --name ollama \
   -v ollama:/root/.ollama \
