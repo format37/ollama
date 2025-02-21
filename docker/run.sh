@@ -11,7 +11,7 @@ fi
 MODEL=$1
 
 # Remove existing container if it exists
-sudo docker rm -f gradio-text 2>/dev/null || true
+sudo docker rm -f ollama-gradio 2>/dev/null || true
 
 # Build the Docker image
 sudo docker build -t gradio-app .
@@ -21,6 +21,6 @@ sudo docker build -t gradio-app .
 # --rm removes the container when it stops
 # --name gives the container a specific name
 # -e sets the environment variable for the model
-sudo docker run --network=host --rm --name gradio-text \
+sudo docker run --network=host --rm --name ollama-gradio \
     -e OLLAMA_MODEL="$MODEL" \
     gradio-app

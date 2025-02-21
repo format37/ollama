@@ -20,4 +20,4 @@ COPY app.py .
 EXPOSE 7860
 
 # Command to run the application
-CMD ["python", "app.py"]
+CMD ["python", "-u", "app.py"]

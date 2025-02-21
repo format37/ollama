@@ -6,6 +6,7 @@ import base64
 import io
 from PIL import Image
 import time
+import sys
 
 # URL of your LLaVA (or other VLM) inference server
 # For example: http://localhost:11434/api/generate
@@ -101,4 +102,6 @@ demo = gr.Interface(
 )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=False)
+    # Force stdout to flush immediately
+    sys.stdout.reconfigure(line_buffering=True)
+    demo.launch(server_name="0.0.0.0", share=True)
