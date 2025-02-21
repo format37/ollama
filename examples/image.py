@@ -1,6 +1,7 @@
 import base64
 import requests
 import json
+from datetime import datetime as dt
 
 def encode_image_to_base64(image_path):
     """Encodes an image file to a base64 string."""
@@ -14,7 +15,7 @@ def main():
     # Replace with your text prompt
     prompt = "What's in this image?"
 
-    prompt = """You are robot. You can see, speak and move.
+    _prompt = """You are robot. You can see, speak and move.
 The available movements are:
 - Left track: speed 0-100, direction (0=forward, 1=backward)
 - Right track: speed 0-100, direction (0=forward, 1=backward)
@@ -46,14 +47,17 @@ Answer in JSON format:
     url = 'http://localhost:11434/api/generate'
     # JSON payload
     data = {
-        # "model": "llava:34b",
-        "model": "Qwen2.5-VL-7B-Instruct",
+        "model": "llava:7b",
+        # "model": "Qwen2.5-VL-7B-Instruct",
         "prompt": prompt,
         "images": [image_base64]
     }
 
     # Send the POST request with stream=True
+    start = dt.now()
     response = requests.post(url, json=data, stream=True)
+    end = dt.now()
+    print(f"Time taken: {end - start}")
     if response.status_code == 200:
         try:
             # Initialize an empty string to collect the model's response
