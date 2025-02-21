@@ -1,66 +1,77 @@
-# Local LLM Chat Interface
+# Ollama Samples
 
-A simple web interface for interacting with Ollama's LLM models using Gradio. Supports running large language models locally on GPU.
+A collection of examples demonstrating how to use Ollama with different models and interfaces.
+
+## Prerequisites
+
+- Docker
+- CUDA-capable GPU
+- Git
+
+## Quick Start
+
+1. Start the Ollama server:
+```bash
+sh serve_ollama.sh
+```
+
+2. Pull your desired model (e.g., LLaVA):
+```bash
+sh pull_model.sh llava:7b
+```
+
+3. Launch the Gradio interface:
+```bash
+cd gradio_image
+sh run.sh llava:7b
+```
+
+4. Open your browser and navigate to: http://0.0.0.0:7860/
+
+## Available Models
+
+You can use various models with this setup. For a complete and up-to-date list of available models, visit [ollama.com/search](https://ollama.com/search).
+
+Some popular vision-language models include:
+- llava
+- bakllava 
+- qwen-vl
+
+And text models like:
+- mistral
+- codellama
+- llama2
+- neural-chat
+- qwen
 
 ## Features
 
-- Local model execution with Ollama
-- Web interface built with Gradio
-- Support for multiple Qwen models (7B, 14B, 32B)
-- Conversation history management
-- JSON response handling
-- Example prompts included
+### Image Processing
+- Upload and analyze images with LLaVA models
+- Real-time image description and analysis
+- Support for various image formats
 
-## Setup
+### Text Processing
+- Interactive chat interface
+- Code generation and analysis
+- Support for multiple languages
 
-1. Install Ollama:
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-```
+## Project Structure
 
-2. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
+- `gradio_image/` - Gradio web interface implementation
+- `examples/` - Several examples of using Ollama
+- `requirements.txt` - Python dependencies
 
-3. Start Ollama with desired model:
-```bash
-./ollama_run.sh  # Default: qwen2.5-coder:32b
-```
+## Scripts
 
-4. Launch the web interface:
-```bash
-python ollama_gradio.py
-```
+- `serve_ollama.sh` - Starts the Ollama server with GPU support
+- `pull_model.sh` - Downloads specified Ollama models
+- `run.sh` - Launches the Gradio interface
 
-Access the chat interface at `http://localhost:7860`
+## Contributing
 
-## Files
+Feel free to submit issues and enhancement requests!
 
-- `ollama_gradio.py`: Main web interface implementation
-- `ollama_run.sh`: Model selection and launch script
-- `json_response.py`: Alternative implementation with JSON response handling
-- `requirements.txt`: Python dependencies
-- `update.sh`: Ollama installation/update script
-- `client.py`: Client for interacting with the Ollama server
+## License
 
-## Models
-A list of available models is published on the [Ollama website](https://ollama.com/models).
-To use a different model, modify the `ollama_run.sh` script.
-
-## Docker
-[Official docker image](https://hub.docker.com/r/ollama/ollama)
-```
-docker run -d --gpus '"device=0"' -e OLLAMA_FLASH_ATTENTION=1 -v ollama:/root/.ollama -p 11434:11434 --name ollama ollama/ollama
-```
-Run a model. Replace `qwen2.5:32b` with the model you want to use.
-```
-docker exec -it ollama ollama run qwen2.5:32b
-```
-
-## Issues
-Error starting userland proxy: listen tcp4 0.0.0.0:11434: bind: address already in use.
-```
-sudo lsof -i :11434
-sudo kill -9 <PID>
-```
+[MIT License](LICENSE)

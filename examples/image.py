@@ -46,7 +46,8 @@ Answer in JSON format:
     url = 'http://localhost:11434/api/generate'
     # JSON payload
     data = {
-        "model": "llava:34b",
+        # "model": "llava:34b",
+        "model": "Qwen2.5-VL-7B-Instruct",
         "prompt": prompt,
         "images": [image_base64]
     }
