@@ -56,8 +56,6 @@ Answer in JSON format:
     # Send the POST request with stream=True
     start = dt.now()
     response = requests.post(url, json=data, stream=True)
-    end = dt.now()
-    print(f"Time taken: {end - start}")
     if response.status_code == 200:
         try:
             # Initialize an empty string to collect the model's response
@@ -81,6 +79,8 @@ Answer in JSON format:
     else:
         print(f"Request failed with status code {response.status_code}")
         print("Error:", response.text)
+    end = dt.now()
+    print(f"Time taken: {end - start}")
 
 if __name__ == "__main__":
     main()
