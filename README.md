@@ -68,6 +68,11 @@ And text models like:
 - `pull_model.sh` - Downloads specified Ollama models
 - `run.sh` - Launches the Gradio interface
 
+### Check the models list
+```
+curl http://127.0.0.1:11434/v1/models
+```
+
 ## Contributing
 
 Feel free to submit issues and enhancement requests!
