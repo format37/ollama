@@ -1,5 +1,6 @@
 import requests
 import json
+import time
 
 def call_ollama(prompt, model="llama3.2:3b", stream=False):
     """
@@ -36,12 +37,25 @@ def call_ollama(prompt, model="llama3.2:3b", stream=False):
 
 if __name__ == "__main__":
     # Example prompt
-    prompt = "Explain quantum computing in simple terms."
-    
+    # prompt = "Explain quantum computing in simple terms."
+    prompt = "Пожалуйста, объясните, как работает квантовый компьютер простыми словами."
     print(f"Sending prompt to Ollama: \"{prompt}\"\n")
     
-    # Call Ollama and get the response
-    response_text = call_ollama(prompt)
-    
+    counter = 0
+    start_time = time.time()
+    while True:
+        iter_start = time.time()
+        # Call Ollama and get the response
+        response_text = call_ollama(prompt, model="qwen2.5:7b", stream=False)
+        iter_end = time.time()
+        print(response_text)
+        print(f"### Inference counter: {counter}")
+        elapsed = iter_end - start_time
+        rps = (counter + 1) / elapsed if elapsed > 0 else float('inf')
+        print(f"Total elapsed time: {elapsed:.2f} seconds")
+        print(f"Average requests per second: {rps:.2f}")
+        print(f"Last request time: {iter_end - iter_start:.2f} seconds\n")
+        counter += 1
+        
     print("Response from Ollama:")
     print(response_text) 
